@@ -20,6 +20,7 @@ test('speech queue state keeps only the newest playback request', () => {
 
 test('direct file testing has a browser speech fallback when eSpeak workers cannot run', () => {
   const source = readFileSync(new URL('../src/espeak.js', import.meta.url), 'utf8');
-  assert.match(source, /location\?\.protocol === 'file:'/);
+  assert.match(source, /audioAssetUrl/);
   assert.match(source, /speechSynthesis/);
+  assert.match(source, /speakStaticAudio/);
 });

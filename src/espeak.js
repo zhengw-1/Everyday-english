@@ -183,6 +183,28 @@ export function createEspeakSpeaker({ scope = globalThis, localWorker = DEFAULT_
   return { speak, stop, cleanup };
 }
 
+function audioAssetUrl(text, scope = globalThis) {
+  const manifest = scope?.__ELDER_ENGLISH_AUDIO_MANIFEST || globalThis?.__ELDER_ENGLISH_AUDIO_MANIFEST || {};
+  return manifest[String(text || '')] || '';
+}
+
+function speakStaticAudio(text, scope) {
+  const url = audioAssetUrl(text, scope);
+  const AudioCtor = scope?.Audio || globalThis?.Audio;
+  if (!url || !AudioCtor) return false;
+  try {
+    const previous = scope?.__elderEnglishAudio;
+    if (previous) { previous.pause?.(); previous.currentTime = 0; }
+    const audio = new AudioCtor(url);
+    audio.preload = 'auto';
+    audio.volume = 1;
+    scope.__elderEnglishAudio = audio;
+    const result = audio.play?.();
+    if (result?.catch) result.catch(() => {});
+    return true;
+  } catch (_) { return false; }
+}
+
 function speakNativeForDirectHtml(text, rate, scope) {
   const synth = scope?.speechSynthesis;
   const Utterance = scope?.SpeechSynthesisUtterance;
@@ -197,10 +219,6 @@ function speakNativeForDirectHtml(text, rate, scope) {
 }
 
 export function speakEnglish(text, rate = 0.82, scope = globalThis) {
-  if (scope?.location?.protocol === 'file:') return speakNativeForDirectHtml(text, rate, scope);
-  // Keep speech inside the button's synchronous click event. Mobile Safari can
-  // block speech that starts later from an async Promise/worker callback.
-  // Browser-native English speech is therefore the primary path for reliable
-  // playback on GitHub Pages and installed PWAs.
+  if (speakStaticAudio(text, scope)) return true;
   return speakNativeForDirectHtml(text, rate, scope);
 }

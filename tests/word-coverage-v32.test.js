@@ -27,6 +27,6 @@ test('the browser bundle contains real meanings for the emergency sentence words
 
 test('service worker cache version is bumped so phones do not keep the old word-meaning bundle', () => {
   const sw = fs.readFileSync(new URL('../sw.js', import.meta.url), 'utf8');
-  assert.match(sw, /CACHE='elder-english-shell-v40'/);
+  assert.match(sw, /CACHE='elder-english-shell-v41'/);
   assert.match(sw, /self\.skipWaiting\(\)/);
 });

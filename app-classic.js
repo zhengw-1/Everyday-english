@@ -183,6 +183,32 @@ function createEspeakSpeaker({ scope = globalThis, localWorker = DEFAULT_LOCAL_W
   return { speak, stop, cleanup };
 }
 
+function audioAssetUrl(text, scope = globalThis) {
+  const manifest = scope?.__ELDER_ENGLISH_AUDIO_MANIFEST || globalThis?.__ELDER_ENGLISH_AUDIO_MANIFEST || {};
+  return manifest[String(text || '')] || '';
+}
+
+function speakStaticAudio(text, rate, scope) {
+  const url = audioAssetUrl(text, scope);
+  const AudioCtor = scope?.Audio || globalThis?.Audio;
+  if (!url || !AudioCtor) return false;
+  try {
+    const previous = scope?.__elderEnglishAudio;
+    if (previous) { previous.pause?.(); previous.currentTime = 0; }
+    const audio = new AudioCtor(url);
+    audio.preload = 'auto';
+    audio.volume = 1;
+    scope.__elderEnglishAudio = audio;
+    // play() is invoked synchronously from the click handler so Safari keeps
+    // the user's tap as the playback gesture.
+    const result = audio.play?.();
+    if (result?.catch) result.catch(() => {});
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function speakNativeForDirectHtml(text, rate, scope) {
   const synth = scope?.speechSynthesis;
   const Utterance = scope?.SpeechSynthesisUtterance;
@@ -196,14 +222,8 @@ function speakNativeForDirectHtml(text, rate, scope) {
   return true;
 }
 
-// Use the browser's native English speech path so playback starts directly
-// from the user's tap on GitHub Pages and installed PWAs.
 function speakEnglish(text, rate = 0.82, scope = globalThis) {
-  if (scope?.location?.protocol === 'file:') return speakNativeForDirectHtml(text, rate, scope);
-  // Keep speech inside the button's synchronous click event. Mobile Safari can
-  // block speech that starts later from an async Promise/worker callback.
-  // Browser-native English speech is therefore the primary path for reliable
-  // playback on GitHub Pages and installed PWAs.
+  if (speakStaticAudio(text, rate, scope)) return true;
   return speakNativeForDirectHtml(text, rate, scope);
 }
 
@@ -608,7 +628,7 @@ function wordCards(en){
 function shuffleCopy(items){return [...items].sort(()=>Math.random()-0.5);}
 
 function practiceTypeLabel(type){
-  return ({all:'综合练习', word:'单词意思', 'word-reverse':'中文 → 英文', 'word-listen':'听单词', 'sentence-order':'排列句子', 'sentence-meaning':'英文 → 中文', 'sentence-listen':'听句子', 'sentence-fill':'句子填空', 'sentence-english':'中文 → 英文'})[type] || '练习';
+  return ({word:'单词意思', 'word-reverse':'中文 → 英文', 'word-listen':'听单词', 'sentence-order':'排列句子', 'sentence-meaning':'英文 → 中文', 'sentence-listen':'听句子', 'sentence-fill':'句子填空', 'sentence-english':'中文 → 英文'})[type] || '练习';
 }
 function categoryLabel(category){
   if(!category || category==='all') return '全部生活英语';
@@ -648,13 +668,13 @@ function resumePracticeSession(sessionId){
   return true;
 }
 function practiceListView(){
-  const sessions=state.practiceSessions || [];
+  const sessions=(state.practiceSessions || []).filter(s=>s.type!=='all');
   const cards=sessions.map(s=>{
     const done=s.index>=s.queue.length;
     const clue=s.clue || s.queue?.[s.index]?.prompt || '生活英语练习';
     return `<article class="card practice-session-card"><div class="practice-session-top"><span class="pill">${escapeHtml(s.categoryLabel||categoryLabel(s.category))}</span><span class="practice-session-type">${escapeHtml(s.typeLabel||practiceTypeLabel(s.type))}</span></div><h3>${escapeHtml(s.categoryLabel||categoryLabel(s.category))} · ${escapeHtml(s.typeLabel||practiceTypeLabel(s.type))}</h3><p class="muted practice-session-clue">${escapeHtml(String(clue))}</p><p class="practice-session-progress">${done?'已完成':`进行到：第 ${Math.min((s.index||0)+1,s.queue.length)} / ${s.queue.length} 题`}</p><button type="button" class="big-action practice-continue" data-practice-id="${escapeHtml(s.id)}">${done?'重新练习':'继续练习 →'}</button></article>`;
   }).join('');
-  return `<section class="hero"><h1>我的练习</h1><p class="muted">每个练习都会单独保存。可以保存很多个，不会互相覆盖。</p></section>${cards || '<div class="empty">还没有保存的练习。先开始一个练习吧。</div>'}<section class="card new-practice-card"><h2>开始新练习</h2><div class="setting-row"><strong>选择分类</strong><select id="practiceCategory"><option value="all">全部生活英语</option>${TOPICS.map(t=>`<option value="${escapeHtml(t.id)}">${escapeHtml(t.label)}</option>`).join('')}</select></div><div class="setting-row"><strong>练习类型</strong><select id="practiceType"><option value="all">综合练习</option><option value="word">单词意思</option><option value="word-reverse">中文 → 英文</option><option value="word-listen">听单词</option><option value="sentence-order">排列句子</option><option value="sentence-meaning">英文 → 中文</option><option value="sentence-listen">听句子</option><option value="sentence-fill">句子填空</option><option value="sentence-english">中文 → 英文</option></select></div><button type="button" class="big-action" id="startSelectedPractice">开始这个练习</button></section>`;
+  return `<section class="hero"><h1>我的练习</h1><p class="muted">每个练习都会单独保存。可以保存很多个，不会互相覆盖。</p></section>${cards || '<div class="empty">还没有保存的练习。先开始一个练习吧。</div>'}<section class="card new-practice-card"><h2>开始新练习</h2><div class="setting-row"><strong>选择分类</strong><select id="practiceCategory"><option value="all">全部生活英语</option>${TOPICS.map(t=>`<option value="${escapeHtml(t.id)}">${escapeHtml(t.label)}</option>`).join('')}</select></div><div class="setting-row"><strong>练习类型</strong><select id="practiceType"><option value="word">单词意思</option><option value="word-reverse">中文 → 英文</option><option value="word-listen">听单词</option><option value="sentence-order">排列句子</option><option value="sentence-meaning">英文 → 中文</option><option value="sentence-listen">听句子</option><option value="sentence-fill">句子填空</option><option value="sentence-english">中文 → 英文</option></select></div><button type="button" class="big-action" id="startSelectedPractice">开始这个练习</button></section>`;
 }
 
 function practiceView(){
@@ -741,7 +761,7 @@ function bind(){
   document.querySelector('#translateBtn')?.addEventListener('click',doTranslate);
   document.querySelector('#micBtn')?.addEventListener('click',doMic);
   document.querySelector('#saveCurrent')?.addEventListener('click',()=>{if(currentTranslation){mergePhrase(state,{...currentTranslation,category:'custom',note:'这是你自己翻译并保存的句子。'});persist();document.querySelector('#saveCurrent').textContent='✅ 已保存';}});
-  document.querySelector('#startSelectedPractice')?.addEventListener('click',()=>{const category=document.querySelector('#practiceCategory')?.value||'all';const mode=document.querySelector('#practiceType')?.value||'all';const items=category==='all'?state.saved:state.saved.filter(x=>x.category===category);const session=createPracticeSession(items,category,mode);if(!session.queue.length){alert('这个分类暂时没有适合这种练习的题目。请换一种练习方式。');return;}savePracticeSession(session);practiceFeedback=null;persist();render();});
+  document.querySelector('#startSelectedPractice')?.addEventListener('click',()=>{const category=document.querySelector('#practiceCategory')?.value||'all';const mode=document.querySelector('#practiceType')?.value||'word';const items=category==='all'?state.saved:state.saved.filter(x=>x.category===category);const session=createPracticeSession(items,category,mode);if(!session.queue.length){alert('这个分类暂时没有适合这种练习的题目。请换一种练习方式。');return;}savePracticeSession(session);practiceFeedback=null;persist();render();});
   document.querySelector('#exitPractice')?.addEventListener('click',()=>{const current=currentPractice();if(current){current.active=false;current.updatedAt=new Date().toISOString();savePracticeSession(current);}practiceFeedback=null;persist();render();});
   document.querySelectorAll('.practice-option').forEach(b=>b.onclick=()=>answerQuestion(b.dataset.answer));
   bindOrderPractice();
