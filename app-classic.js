@@ -197,11 +197,17 @@ function speakNativeForDirectHtml(text, rate, scope) {
 }
 
 // GitHub Pages/HTTPS uses eSpeak-NG as the primary speech engine.
+// If the local/remote eSpeak engine cannot initialize, fall back to the
+// browser's built-in English speech so the Listen buttons still produce sound.
 let defaultSpeaker;
 function speakEnglish(text, rate = 0.82, scope = globalThis) {
   if (scope?.location?.protocol === 'file:') return speakNativeForDirectHtml(text, rate, scope);
   if (!defaultSpeaker) defaultSpeaker = createEspeakSpeaker({ scope });
-  defaultSpeaker.speak(text, rate);
+  Promise.resolve(defaultSpeaker.speak(text, rate)).then((played) => {
+    if (!played) speakNativeForDirectHtml(text, rate, scope);
+  }).catch(() => {
+    speakNativeForDirectHtml(text, rate, scope);
+  });
   return true;
 }
 
