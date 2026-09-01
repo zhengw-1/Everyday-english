@@ -1,0 +1,9 @@
+QUICK TEST — OPEN THE HTML
+
+1. Unzip this folder.
+2. Double-click index.html.
+3. The app should open in Safari without Terminal or START-HERE.command.
+4. Check the home page, 分类, 我的英语, 练习, and 设置.
+5. Tap an audio button to test English pronunciation.
+
+NOTE: Direct file:// testing is intended for the UI and basic interaction. A browser web origin (such as GitHub Pages or a local HTTP server) is the reliable environment for the eSpeak worker/data files.

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#567A66" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>生活英语</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon.svg" />
+  <link rel="stylesheet" href="./src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <button class="brand" data-nav="home" aria-label="回到首页"><strong>生活英语</strong></button>
+      <button class="settings-shortcut" data-nav="settings" aria-label="打开设置">⚙️ <span>设置</span></button>
+    </header>
+    <main id="view" tabindex="-1"></main>
+    <nav class="bottom-nav" aria-label="主要功能">
+      <button data-nav="translate"><span>翻译</span></button>
+      <button data-nav="categories"><span>分类</span></button>
+      <button data-nav="saved"><span>我的英语</span></button>
+      <button data-nav="practice"><span>练习</span></button>
+      <button data-nav="settings"><span>设置</span></button>
+    </nav>
+  </div>
+  <script src="./lib/espeak/espeakng.min.js"></script>
+  <script src="./app-classic.js"></script>
+</body>
+</html>
