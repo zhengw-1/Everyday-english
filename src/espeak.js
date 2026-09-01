@@ -196,11 +196,11 @@ function speakNativeForDirectHtml(text, rate, scope) {
   return true;
 }
 
-// GitHub Pages/HTTPS uses eSpeak-NG as the primary speech engine.
-let defaultSpeaker;
 export function speakEnglish(text, rate = 0.82, scope = globalThis) {
   if (scope?.location?.protocol === 'file:') return speakNativeForDirectHtml(text, rate, scope);
-  if (!defaultSpeaker) defaultSpeaker = createEspeakSpeaker({ scope });
-  defaultSpeaker.speak(text, rate);
-  return true;
+  // Keep speech inside the button's synchronous click event. Mobile Safari can
+  // block speech that starts later from an async Promise/worker callback.
+  // Browser-native English speech is therefore the primary path for reliable
+  // playback on GitHub Pages and installed PWAs.
+  return speakNativeForDirectHtml(text, rate, scope);
 }
