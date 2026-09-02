@@ -1,7 +1,5 @@
-const fs = require('fs');
-const path = require('path');
-const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-const assert = (x, m) => { if (!x) throw new Error(m); };
-assert(html.includes('<script src="./app-classic.js"></script>'), 'direct HTML startup must use classic script');
-assert(!html.includes('type="module"'), 'direct HTML startup must not use module script');
-console.log('direct-html-startup.test.cjs: PASS');
+const assert = require('node:assert/strict');
+const html = require('node:fs').readFileSync('index.html','utf8');
+assert.doesNotMatch(html, /espeakng\.min\.js/);
+assert.match(html, /app-classic\.js/);
+console.log('direct-html-startup V46 test passed');

@@ -1,0 +1,17 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const source = fs.readFileSync('/mnt/data/v47_work/app-classic.js','utf8');
+const start = source.indexOf('function speakEnglish(');
+const end = source.indexOf('\n}', start) + 2;
+const block = source.slice(start, end);
+assert.match(block, /speakNativeForDirectHtml\(text, 0\.82, scope\)/);
+const nativeStart = source.indexOf('function speakNativeForDirectHtml(');
+const nativeEnd = source.indexOf('\n}', nativeStart) + 2;
+const native = source.slice(nativeStart, nativeEnd);
+assert.match(native, /const synth = scope\?\.speechSynthesis/);
+assert.match(native, /const Utterance = scope\?\.SpeechSynthesisUtterance/);
+assert.match(native, /synth\.cancel\?\.\(\)/);
+assert.match(native, /const utterance = new Utterance\(String\(text \|\| ''\)\)/);
+assert.match(native, /utterance\.lang = 'en-US'/);
+assert.match(native, /utterance\.rate = Number\(rate\) \|\| 0\.82/);
+assert.match(native, /synth\.speak\(utterance\)/);

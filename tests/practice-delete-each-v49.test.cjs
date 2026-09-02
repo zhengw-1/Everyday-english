@@ -1,0 +1,11 @@
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const app = fs.readFileSync(path.join(__dirname, '..', 'app-classic.js'), 'utf8');
+const line = app.split('\n').find(x => x.includes('practice-delete') && x.includes('practice-continue'));
+assert.ok(line, 'practice session cards must include both continue and delete controls');
+assert.match(line, /practice-delete/);
+assert.doesNotMatch(line, /done\?`<button/);
+assert.match(app, /function deletePracticeSession\(sessionId\)/);
+assert.match(app, /确定删除这个练习吗/);
+console.log('practice delete each-session test passed');

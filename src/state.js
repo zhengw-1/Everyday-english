@@ -45,6 +45,7 @@ export function mergePhrase(state, phrase) {
     createdAt: phrase.createdAt || new Date().toISOString(),
     correct: Number(phrase.correct || 0),
     wrong: Number(phrase.wrong || 0),
+    source: phrase.source || (phrase.category === 'custom' ? 'translation' : 'built-in'),
   };
   state.saved.unshift(item);
   return item;

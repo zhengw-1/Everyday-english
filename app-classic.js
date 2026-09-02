@@ -1,230 +1,22 @@
-const DEFAULT_LOCAL_WORKER = './lib/espeak/espeakng.worker.js';
-const DEFAULT_REMOTE_WORKER = 'https://cdn.jsdelivr.net/espeakng.js/latest/espeakng.worker.js';
-const DEFAULT_REMOTE_DATA = 'https://cdn.jsdelivr.net/espeakng.js/latest/espeakng.worker.data';
-
-function mapVoiceRate(value) {
-  const n = Number(value);
-  if (n <= 0.7) return 120;
-  if (n <= 0.9) return 145;
-  return 175;
-}
-
-function createSpeechQueueState() {
-  let id = 0;
-  return {
-    currentText: '',
-    next(text) {
-      id += 1;
-      this.currentText = String(text || '');
-      return id;
-    },
-    isCurrent(requestId) {
-      return requestId === id;
-    }
-  };
-}
-
-function audioContextFor(scope) {
-  const Ctx = scope?.AudioContext || scope?.webkitAudioContext;
-  if (!Ctx) return null;
-  if (!scope.__elderEnglishAudioContext) scope.__elderEnglishAudioContext = new Ctx();
-  const ctx = scope.__elderEnglishAudioContext;
-  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-  return ctx;
-}
-
-function normalizeSamples(samples) {
-  if (!samples) return new Float32Array();
-  if (samples instanceof Float32Array) return samples;
-  if (samples instanceof Int16Array) {
-    const out = new Float32Array(samples.length);
-    for (let i = 0; i < samples.length; i += 1) out[i] = samples[i] / 32768;
-    return out;
-  }
-  return Float32Array.from(samples);
-}
-
-function playSamples(scope, samples, sampleRate = 22050) {
-  const ctx = audioContextFor(scope);
-  if (!ctx || !samples.length) return false;
-  const buffer = ctx.createBuffer(1, samples.length, sampleRate);
-  buffer.copyToChannel(samples, 0);
-  const source = ctx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(ctx.destination);
-  if (scope.__elderEnglishSource) {
-    try { scope.__elderEnglishSource.stop(); } catch (_) {}
-    try { scope.__elderEnglishSource.disconnect(); } catch (_) {}
-  }
-  scope.__elderEnglishSource = source;
-  source.onended = () => {
-    if (scope.__elderEnglishSource === source) scope.__elderEnglishSource = null;
-    try { source.disconnect(); } catch (_) {}
-  };
-  source.start();
-  return true;
-}
-
-async function resourceExists(url, scope) {
+function speakNativeForDirectHtml(text, rate, scope = globalThis) {
+  const synth = scope?.speechSynthesis;
+  const Utterance = scope?.SpeechSynthesisUtterance;
+  if (!synth || !Utterance) return false;
   try {
-    const head = await scope.fetch(url, { method: 'HEAD', cache: 'no-store' });
-    if (head.ok) return true;
-  } catch (_) {}
-  try {
-    const get = await scope.fetch(url, { cache: 'no-store' });
-    return get.ok;
-  } catch (_) {
-    return false;
-  }
-}
-
-async function localWorkerExists(workerUrl, dataUrl, scope) {
-  return resourceExists(workerUrl, scope) && resourceExists(dataUrl, scope);
-}
-
-function rewriteWorkerDataReference(source, dataUrl) {
-  const replacement = `var REMOTE_PACKAGE_BASE=${JSON.stringify(dataUrl)};`;
-  return String(source || '')
-    .replace(/var REMOTE_PACKAGE_BASE=\"[^\"]+\";/, replacement)
-    .replace(/var REMOTE_PACKAGE_NAME=\"[^\"]+\";/, replacement);
-}
-
-async function makeRemoteWorkerBlob(scope, workerUrl, dataUrl) {
-  const response = await scope.fetch(workerUrl, { cache: 'no-store' });
-  if (!response.ok) throw new Error('无法加载 eSpeak-NG 语音引擎。');
-  let source = await response.text();
-  source = rewriteWorkerDataReference(source, dataUrl);
-  return scope.URL.createObjectURL(new scope.Blob([source], { type: 'application/javascript' }));
-}
-
-function createEspeakSpeaker({ scope = globalThis, localWorker = DEFAULT_LOCAL_WORKER, remoteWorker = DEFAULT_REMOTE_WORKER, remoteData = DEFAULT_REMOTE_DATA } = {}) {
-  const queue = createSpeechQueueState();
-  let ttsPromise = null;
-  let workerBlobUrl = null;
-
-  async function getTTS() {
-    if (ttsPromise) return ttsPromise;
-    ttsPromise = new Promise(async (resolve, reject) => {
-      try {
-        if (typeof scope.eSpeakNG !== 'function') throw new Error('eSpeak-NG wrapper 没有加载。');
-        const localData = localWorker.replace(/\.js$/, '.data');
-        const hasLocalData = await resourceExists(localData, scope);
-        const hasLocalWorker = await localWorkerExists(localWorker, localData, scope);
-        const workerPath = hasLocalWorker
-          ? localWorker
-          : await makeRemoteWorkerBlob(scope, remoteWorker, remoteData);
-        if (!hasLocalWorker) workerBlobUrl = workerPath;
-        const instance = new scope.eSpeakNG(workerPath, () => resolve(instance));
-        instance.set_voice('en-us');
-        instance.set_pitch(50);
-      } catch (error) {
-        reject(error);
-      }
-    });
-    return ttsPromise;
-  }
-
-  async function speak(text, appRate = 0.82) {
-    const value = String(text || '').trim();
-    if (!value) return false;
-    const requestId = queue.next(value);
-    const ctx = audioContextFor(scope);
-    if (!ctx) return false;
-
-    try {
-      const tts = await getTTS();
-      if (!queue.isCurrent(requestId)) return true;
-      tts.set_rate(mapVoiceRate(appRate));
-      tts.set_pitch(50);
-      tts.set_voice('en-us');
-      const chunks = [];
-      await new Promise((resolve, reject) => {
-        try {
-          tts.synthesize(value, (samples) => {
-            if (samples) chunks.push(normalizeSamples(samples));
-            else resolve();
-          });
-        } catch (error) {
-          reject(error);
-        }
-      });
-      if (!queue.isCurrent(requestId)) return true;
-      const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-      const combined = new Float32Array(total);
-      let offset = 0;
-      for (const chunk of chunks) {
-        combined.set(chunk, offset);
-        offset += chunk.length;
-      }
-      return playSamples(scope, combined, 22050);
-    } catch (error) {
-      console.warn('eSpeak-NG playback failed:', error);
-      return false;
-    }
-  }
-
-  function stop() {
-    queue.next('');
-    if (scope.__elderEnglishSource) {
-      try { scope.__elderEnglishSource.stop(); } catch (_) {}
-      try { scope.__elderEnglishSource.disconnect(); } catch (_) {}
-      scope.__elderEnglishSource = null;
-    }
-  }
-
-  function cleanup() {
-    stop();
-    if (workerBlobUrl) {
-      try { scope.URL.revokeObjectURL(workerBlobUrl); } catch (_) {}
-      workerBlobUrl = null;
-    }
-  }
-
-  return { speak, stop, cleanup };
-}
-
-function audioAssetUrl(text, scope = globalThis) {
-  const manifest = scope?.__ELDER_ENGLISH_AUDIO_MANIFEST || globalThis?.__ELDER_ENGLISH_AUDIO_MANIFEST || {};
-  return manifest[String(text || '')] || '';
-}
-
-function speakStaticAudio(text, rate, scope) {
-  const url = audioAssetUrl(text, scope);
-  const AudioCtor = scope?.Audio || globalThis?.Audio;
-  if (!url || !AudioCtor) return false;
-  try {
-    const previous = scope?.__elderEnglishAudio;
-    if (previous) { previous.pause?.(); previous.currentTime = 0; }
-    const audio = new AudioCtor(url);
-    audio.preload = 'auto';
-    audio.volume = 1;
-    scope.__elderEnglishAudio = audio;
-    // play() is invoked synchronously from the click handler so Safari keeps
-    // the user's tap as the playback gesture.
-    const result = audio.play?.();
-    if (result?.catch) result.catch(() => {});
+    synth.cancel?.();
+    const utterance = new Utterance(String(text || ''));
+    utterance.lang = 'en-US';
+    utterance.rate = Number(rate) || 0.82;
+    synth.speak(utterance);
     return true;
   } catch (_) {
     return false;
   }
 }
 
-function speakNativeForDirectHtml(text, rate, scope) {
-  const synth = scope?.speechSynthesis;
-  const Utterance = scope?.SpeechSynthesisUtterance;
-  if (!synth || !Utterance) return false;
-  synth.cancel?.();
-  const utterance = new Utterance(String(text || ''));
-  utterance.lang = 'en-US';
-  utterance.rate = Math.max(0.55, Math.min(1, Number(rate) || 0.82));
-  utterance.pitch = 1;
-  synth.speak(utterance);
-  return true;
-}
-
-function speakEnglish(text, rate = 0.82, scope = globalThis) {
-  if (speakStaticAudio(text, rate, scope)) return true;
-  return speakNativeForDirectHtml(text, rate, scope);
+function speakEnglish(text, _rate = 0.82, scope = globalThis) {
+  // Voice A: exactly the approved original native speech behavior.
+  return speakNativeForDirectHtml(text, 0.82, scope);
 }
 
 const STORAGE_KEY = 'elder-english-state-v1';
@@ -274,6 +66,7 @@ function mergePhrase(state, phrase) {
     createdAt: phrase.createdAt || new Date().toISOString(),
     correct: Number(phrase.correct || 0),
     wrong: Number(phrase.wrong || 0),
+    source: phrase.source || (phrase.category === 'custom' ? 'translation' : 'built-in'),
   };
   state.saved.unshift(item);
   return item;
@@ -337,6 +130,7 @@ const TOPICS = [
   { id:'numbers', icon:'🔢', label:'数字' },
   { id:'time', icon:'🕐', label:'时间' },
   { id:'everyday', icon:'💬', label:'日常对话' },
+  { id:'new-china', icon:'🥡', label:'New China 餐馆' },
 ];
 
 const DATA = {
@@ -468,20 +262,98 @@ Object.assign(WORDS, {
   ten:['十；十个','数字 10。'], time:['时间；次数','这里可表示时间，也可表示次数。']
 });
 
+const NEW_CHINA_DATA = [
+  ["你好，这里是新中国餐馆。", "Hi, this is New China Restaurant.", "接电话时介绍新中国餐馆。"],
+  ["您想要什么？", "What would you like?", "接电话或点餐时询问客人想要什么。"],
+  ["自取还是外送？", "Is that for pickup or delivery?", "确认客人是来取餐还是需要外送。"],
+  ["您的地址是什么？", "What is your address?", "外送时询问客人的地址。"],
+  ["您的电话号码是多少？", "What is your phone number?", "点餐或外送时询问电话号码。"],
+  ["小份还是大份？", "Small or large?", "询问客人要小份还是大份。"],
+  ["要蔬菜还是不要蔬菜？", "With vegetables or no vegetables?", "确认客人是否要加蔬菜。"],
+  ["您要几个？", "How many would you like?", "询问客人需要几个。"],
+  ["还要别的吗？", "Anything else?", "点餐结束前询问客人是否还需要别的东西。"],
+  ["请稍等。", "Please wait a moment.", "让客人稍等一下。"],
+  ["您几点来取餐？", "What time will you pick it up?", "自取订单时询问取餐时间。"],
+  ["谢谢您打电话给新中国。", "Thank you for calling New China.", "电话结束时礼貌地感谢客人。"],
+  ["左宗棠鸡", "General Tso's Chicken", "新中国菜单上的常见鸡肉菜名。"],
+  ["西兰花鸡", "Chicken with Broccoli", "鸡肉和西兰花的常见中式外卖菜名。"],
+  ["牛肉捞面", "Beef Lo Mein", "牛肉和捞面的常见外卖菜名。"],
+  ["虾炒饭", "Shrimp Fried Rice", "虾和炒饭的常见外卖菜名。"],
+  ["薯条", "French Fries", "炸土豆条。"],
+  ["鸡翅", "Chicken Wings", "鸡翅做成的常见小吃或菜。"],
+  ["蛋卷", "Egg Roll", "常见的中式炸卷类小吃。"],
+  ["披萨卷", "Pizza Roll", "里面有披萨馅料的卷类小吃。"],
+];
+
+const V11_WORD_DEFINITIONS = {
+  "anything": ["任何东西；任何事", "用于询问是否还有其他东西。"],
+  "broccoli": ["西兰花", "绿色花球状的蔬菜。"],
+  "chicken": ["鸡；鸡肉", "可以指鸡这种动物，也可以指鸡肉。"],
+  "delivery": ["外送；配送", "把食物或东西送到客人指定的地方。"],
+  "egg": ["鸡蛋", "鸡产的蛋，也常用于做菜。"],
+  "else": ["其他；另外", "表示除了已经提到的东西以外。"],
+  "french": ["法式的", "在 French Fries 中表示这种薯条的名称。"],
+  "fried": ["炒的；炸的", "用油加热烹调的食物。"],
+  "fries": ["薯条", "切成条状后油炸的土豆。"],
+  "general": ["将军；普通的", "General Tso's Chicken 中是菜名的一部分。"],
+  "how": ["怎么；如何", "询问方式或程度。"],
+  "is": ["是；处于", "be 的第三人称单数形式。"],
+  "large": ["大的；大份的", "尺寸或份量比较大。"],
+  "lo": ["捞面中的 Lo", "Lo Mein 是一种中式面条菜名。"],
+  "mein": ["面（Lo Mein 中）", "Lo Mein 是一种中式面条菜名。"],
+  "many": ["许多；多少", "用于询问或表示数量。"],
+  "no": ["不；没有", "用于否定回答或表示没有。"],
+  "or": ["或者", "表示两个或多个选择中的一个。"],
+  "pickup": ["自取；取餐", "客人自己到餐馆取已经准备好的订单。"],
+  "pizza": ["披萨", "一种常见的烘烤食品，通常有面饼、酱料和奶酪等。"],
+  "restaurant": ["餐馆；餐厅", "提供食物和饮料给客人用餐或购买的地方。"],
+  "rice": ["米饭；米", "常见的主食，也用于炒饭等菜。"],
+  "roll": ["卷；卷类食物", "把食物卷起来做成的食物，也可指面包卷。"],
+  "shrimp": ["虾", "常见的海鲜食材。"],
+  "small": ["小的；小份的", "尺寸或份量比较小。"],
+  "tso's": ["Tso 的", "General Tso's Chicken 菜名中的专有名称部分。"],
+  "vegetables": ["蔬菜（复数）", "可以作为食物吃的植物部分，vegetable 的复数形式。"],
+  "wings": ["鸡翅；翅膀（复数）", "chicken wings 中指鸡翅。"],
+  "with": ["和；带有", "表示一起或包含某种东西。"],
+  "would": ["会；愿意；想要", "常用于礼貌地询问或表达想要什么。"]
+  ,"a": ["一个；一名", "用于表示一个人或一件事。"]
+  ,"calling": ["打电话；致电", "call 的现在分词，在这里表示打电话给餐馆。"]
+  ,"china": ["中国；中国的", "China 是中国的英文名称；这里也是餐馆名称的一部分。"]
+  ,"for": ["给；为了", "表示对象、目的或用途。"]
+  ,"hi": ["你好；嗨", "非正式的打招呼用语。"]
+  ,"it": ["它；这件事", "用来指代已经提到的人、事或东西。"]
+  ,"like": ["喜欢；想要", "可以表示喜欢，也常用于 would like 表达想要。"]
+  ,"moment": ["片刻；一会儿", "很短的一段时间。"]
+  ,"new": ["新的", "表示以前没有或最近出现的。"]
+  ,"number": ["数字；号码", "表示数量的符号，也可指电话号码等编号。"]
+  ,"phone": ["电话；手机", "用来通话的设备。"]
+  ,"pick": ["拿；取", "在 pick it up 中表示取走或取餐。"]
+  ,"please": ["请", "用于礼貌地提出请求。"]
+  ,"thank": ["感谢", "表示对别人帮助或服务的感谢。"]
+  ,"that": ["那个；那件事", "用来指已经提到或距离较远的人、事或东西。"]
+  ,"this": ["这个；这里的", "用来指眼前或刚提到的人、事或东西。"]
+  ,"up": ["向上；起来", "在 pick it up 中表示取走。"]
+  ,"wait": ["等待；等一下", "暂时不离开，等一会儿。"]
+  ,"what": ["什么；什么东西", "用于询问事物或信息。"]
+  ,"will": ["将会；会", "表示将来发生的事情。"]
+  ,"you": ["你；您；你们", "指正在说话的对象。"]
+  ,"your": ["你的；您的", "表示某样东西属于正在说话的人。"]
+};
+
 const V10_WORD_DEFINITIONS = {"address":["地址","表示一个地点的具体地址。"],"after":["在……以后","表示时间在某件事之后。"],"again":["再一次","表示重复做一次。"],"airport":["机场","飞机起飞和降落的地方。"],"allergic":["过敏的","身体对某种食物或药物产生过敏反应。"],"already":["已经","表示某件事在现在以前发生了。"],"ambulance":["救护车","运送病人或伤者去医院的车辆。"],"answer":["回答；答案","answer 可以表示回答，也可以表示问题的答案。"],"apple":["苹果","常见的圆形水果。"],"apples":["苹果（复数）","apple 的复数形式，表示两个或更多苹果。"],"appointment":["预约","事先约好的见面或看诊时间。"],"april":["四月","一年中的第四个月。"],"arrive":["到达","到达某个地方。"],"arrived":["到达了","arrive 的过去式，表示已经到达。"],"ask":["问；询问","向别人提出问题或请求信息。"],"at":["在；于","表示具体时间或地点。"],"august":["八月","一年中的第八个月。"],"away":["离开；远处","表示离某个地方有距离或离开。"],"bacon":["培根","通常腌制后煎熟的猪肉。"],"banana":["香蕉","常见的黄色水果。"],"bananas":["香蕉（复数）","banana 的复数形式。"],"bathroom":["浴室；洗手间","洗澡、洗手或上厕所的房间。"],"battery":["电池","储存并提供电力的装置。"],"be":["是；存在","表示身份、状态或存在。"],"beans":["豆类；豆子","豆类植物的种子，也可指豆类蔬菜。"],"beautiful":["漂亮的；美丽的","形容外表或景色很好看。"],"bed":["床","用来睡觉和休息的家具。"],"bedroom":["卧室","睡觉和休息的房间。"],"beef":["牛肉","牛的肉。"],"been":["是过；处于过","be 的过去分词，常用于完成时。"],"before":["在……以前","表示时间早于某件事。"],"bigger":["更大的","big 的比较级，表示尺寸更大。"],"bill":["账单；纸币","在餐厅表示账单，也可以指纸币。"],"birthday":["生日","一个人出生的日期，每年庆祝的日子。"],"black":["黑色的","一种很深的颜色。"],"bleeding":["流血","血液正在从身体流出。"],"blooming":["正在开花","花正在开放。"],"blueberry":["蓝莓","一种小而圆的蓝色或深紫色水果。"],"bones":["骨头","构成身体骨骼的硬组织；bones 是复数。"],"breakfast":["早餐","一天中的第一顿饭。"],"breast":["胸部；乳房","身体前面的胸部区域；在 chicken breast 中指鸡胸肉。"],"bridge":["桥","跨过河流、道路等的建筑。"],"broccoli":["西兰花","绿色花球状的蔬菜。"],"brother":["兄弟","男性的兄弟姐妹。"],"buy":["买","用钱换取商品或服务。"],"by":["通过；在……旁边","表示方式、手段或靠近的位置。"],"cabbage":["卷心菜","圆形叶菜。"],"call":["打电话；呼叫","通过电话联系，也可以表示叫某人。"],"card":["卡；卡片","用于付款、身份或其他用途的卡片。"],"care":["照顾；关心","照顾某人或在意某事。"],"careful":["小心的","做事时注意安全和细节。"],"carrot":["胡萝卜","常见的橙色根茎类蔬菜。"],"cash":["现金","纸币和硬币等实物钱。"],"celery":["芹菜","茎比较脆的蔬菜。"],"chair":["椅子","供人坐的家具。"],"change":["零钱；改变","付款时可指找零，也可以表示改变。"],"charger":["充电器","给电子设备充电的设备。"],"cheap":["便宜的","价格比较低。"],"cheaper":["更便宜的","cheap 的比较级，表示价格更低。"],"check":["账单；检查","餐厅中可指账单，也可以表示检查。"],"cherry":["樱桃","小而圆的水果。"],"chicken":["鸡；鸡肉","可以指鸡这种动物，也可以指鸡肉。"],"child":["孩子","年龄较小的人，也可以指自己的儿女。"],"chop":["切；剁","用刀把食物切成块或片。"],"clearly":["清楚地","以容易听懂或看懂的方式。"],"close":["关；关闭","把打开的东西合上或关闭。"],"cloudy":["多云的","天空有很多云，阳光较少。"],"coat":["外套","穿在衣服外面的保暖或防风衣服。"],"coffee":["咖啡","用咖啡豆制作的饮料。"],"coin":["硬币","金属制成的钱。"],"cold":["冷的","温度比较低。"],"coldest":["最冷的","cold 的最高级，表示温度最低。"],"color":["颜色","物体看起来的色彩。"],"colors":["颜色（复数）","color 的复数形式。"],"contact":["联系人","手机中保存的某个人的信息。"],"cool":["凉的；酷的","天气中表示温度较凉，也可表示很酷。"],"corn":["玉米","常见的黄色谷物和食物。"],"corner":["角落；拐角","两条边或道路相接的位置。"],"cough":["咳嗽","一种把空气从呼吸道快速呼出的动作。"],"course":["课程；过程","学习中的课程，也可表示事情进行的过程。"],"credit":["信用","付款中指信用额度或信用卡相关的信用。"],"cross":["穿过","从一边到另一边通过。"],"cucumber":["黄瓜","细长的绿色蔬菜。"],"cup":["杯；一杯","用来装饮料的容器，也可表示一杯的量。"],"dangerous":["危险的","可能造成伤害或危险。"],"date":["日期","表示某一天的年月日。"],"daughter":["女儿","父母的女性孩子。"],"day":["天；一天","从一天到下一天的时间单位。"],"dead":["没电的；死亡的","手机中可表示电池没电；也可表示没有生命。"],"debit":["借记","银行账户直接扣款的付款方式。"],"december":["十二月","一年中的第十二个月。"],"decided":["决定了","decide 的过去式，表示已经作出决定。"],"delicious":["美味的","味道很好吃。"],"did":["做了；用于过去时","do 的过去式，表示过去做过某事。"],"dinner":["晚餐","通常在晚上吃的一顿饭。"],"discount":["折扣","从原价中减去的一部分价格。"],"dish":["菜；盘子","可以指一道菜，也可以指装食物的盘子。"],"dizzy":["头晕的","感觉身体或周围好像在转，站立不稳。"],"doctor":["医生","检查和治疗病人的专业人员。"],"dollar":["美元","美国使用的货币单位。"],"dollars":["美元（复数）","dollar 的复数形式。"],"door":["门","房间或建筑物的出入口。"],"dose":["剂量","一次应该使用的药量。"],"down":["向下","表示从较高处向较低处。"],"downstairs":["楼下","建筑物较低的一层或向较低楼层移动。"],"downtown":["市中心","城市中心的商业或主要区域。"],"drink":["喝；饮料","可以表示喝东西，也可以表示饮料。"],"duck":["鸭；鸭肉","可以指鸭这种动物，也可以指鸭肉。"],"early":["早；接近","时间比预期早，或接近某个时间或数量。"],"eat":["吃","把食物放进嘴里并进食。"],"effect":["效果；影响","某件事情产生的结果或影响。"],"eight":["八","数字 8。"],"eleven":["十一","数字 11。"],"english":["英语","英国、美国等地使用的语言。"],"entrance":["入口","进入建筑或地点的地方。"],"exit":["出口","离开建筑或地点的地方。"],"expensive":["贵的","价格比较高。"],"express":["快车；快速的","交通中表示停站较少的快车，也可表示速度快。"],"fall":["秋天；跌倒","美国英语中指秋天，也可以表示跌倒。"],"family":["家人；家庭","有家庭关系的一群人。"],"far":["远的","距离比较大。"],"father":["父亲","男性家长。"],"february":["二月","一年中的第二个月。"],"feel":["感觉","用身体或情绪感受到某种状态。"],"fever":["发烧","体温高于正常水平的状态。"],"find":["找到；发现","经过寻找后得到或发现某物。"],"first":["第一","表示顺序中的第一个。"],"five":["五","数字 5。"],"floor":["地板；楼层","房间下面的表面，也可指建筑物的一层。"],"flowers":["花（复数）","植物开放的花朵。"],"foggy":["有雾的","空气中有很多雾，视线受到影响。"],"forecast":["预报","对未来情况的预测；weather forecast 是天气预报。"],"forgot":["忘记了","forget 的过去式，表示没有记住。"],"fork":["叉子","吃饭时用来叉食物的餐具。"],"four":["四","数字 4。"],"free":["免费的；自由的","不需要付钱，也可表示不受限制。"],"fresh":["新鲜的","没有变质、刚买或保存良好的。"],"from":["从；来自","表示起点、来源或来自某地。"],"full":["饱的；满的","吃完后没有食欲，也可表示容器装满。"],"garlic":["大蒜","有强烈味道的调味食材。"],"get":["得到；到达；变得","根据句子可以表示取得、到达或发生变化。"],"getting":["正在变得；得到","get 的现在分词，表示正在发生的取得或变化。"],"give":["给","把东西交给别人。"],"glass":["玻璃杯；一杯","装饮料的杯子，也可表示一杯的量。"],"goodbye":["再见","道别时说的话。"],"granddaughter":["孙女","儿子或女儿的女儿。"],"grandfather":["祖父；外祖父","父亲或母亲的爸爸。"],"grandmother":["祖母；外祖母","父亲或母亲的妈妈。"],"grandson":["孙子","儿子或女儿的儿子。"],"grape":["葡萄","一串串生长的小水果。"],"green":["绿色的","一种常见的颜色。"],"ground":["地面；绞碎的","可以指地面，也可表示食材被绞碎。"],"half":["一半","一个整体的二分之一。"],"ham":["火腿","经过腌制或熟制的猪腿肉。"],"happy":["开心的；高兴的","表示感到快乐。"],"has":["有；拥有","have 的第三人称单数形式。"],"headache":["头痛","头部疼痛的感觉。"],"hear":["听见","用耳朵接收到声音。"],"hello":["你好","常用的打招呼用语。"],"high":["高的","位置、数量或程度比较高。"],"home":["家","自己居住的地方。"],"hot":["热的","温度比较高。"],"hour":["小时","六十分钟的时间单位。"],"humidity":["湿度","空气中水分的多少。"],"hundred":["一百","数字 100。"],"hungry":["饿的","感到想吃东西。"],"hurt":["疼；伤害","表示身体疼痛，也可表示使人受伤。"],"hurts":["疼；使疼痛","hurt 的第三人称单数形式。"],"husband":["丈夫","结婚关系中的男性配偶。"],"ice":["冰","冻结成固体的水。"],"incoming":["进来的","正在进入或到来的。"],"injured":["受伤的","身体受到伤害的状态。"],"intersection":["十字路口","两条或多条道路相交的地方。"],"january":["一月","一年中的第一个月。"],"juice":["果汁","水果等食材榨出的液体饮料。"],"july":["七月","一年中的第七个月。"],"june":["六月","一年中的第六个月。"],"just":["只是；刚刚","根据句子可表示仅仅或刚刚发生。"],"key":["钥匙","用来开锁的物品。"],"kitchen":["厨房","做饭和准备食物的房间。"],"kiwi":["猕猴桃","棕色外皮、绿色果肉的水果。"],"lamb":["羊肉；羔羊","lamb 可指幼羊，也可指羊肉。"],"lamp":["灯","用来照明的设备。"],"large":["大的；大号的","尺寸比较大。"],"last":["最后的；上一个","可以表示顺序最后，也可以表示前一个时间段。"],"late":["晚的","时间比正常或预期晚。"],"later":["稍后；后来","表示在之后的时间。"],"leave":["离开；留下","可以表示从某地离开，也可以表示让某物留在那里。"],"leaves":["树叶；离开","leave 的第三人称单数，也可以是 leaf 的复数。"],"left":["左边的；离开了","表示方向左边，也可为 leave 的过去式。"],"leg":["腿","人体从髋部到脚的部分；也可指鸡腿等动物腿部。"],"lemon":["柠檬","黄色、味道酸的水果。"],"less":["较少；更少","表示数量或程度比较低。"],"lettuce":["生菜","常见的叶菜。"],"light":["光；灯","照亮环境的光，也可指照明设备。"],"liquid":["液体","没有固定形状、可以流动的物质。"],"little":["少量的；小的","表示数量少或尺寸小。"],"live":["居住；生活","可以表示住在某处或生活。"],"living":["居住的；生活中的","表示正在生活或居住的状态。"],"long":["长的；长时间的","表示长度大或持续时间久。"],"looking":["正在看","look 的现在分词，表示正在看。"],"luck":["运气","事情顺利或不顺利的结果。"],"lunch":["午餐","通常在中午吃的一顿饭。"],"mango":["芒果","香甜多汁的热带水果。"],"many":["许多；很多","表示数量比较多。"],"march":["三月","一年中的第三个月。"],"may":["五月；可能","May 是五月，也可作为情态动词表示可能。"],"maybe":["也许","表示不确定的可能性。"],"meal":["一顿饭","一次吃的完整食物。"],"meat":["肉","动物的肉，可作为食物。"],"medicine":["药；药物","用于预防、治疗或缓解疾病的物质。"],"meet":["见面；遇见","和某人见面或遇到某人。"],"menu":["菜单","餐厅列出食物和饮料的清单。"],"message":["消息；留言","传给别人的信息。"],"midnight":["午夜","夜里十二点左右的时间。"],"milk":["牛奶","常见的乳制饮料。"],"minute":["分钟","六十秒的时间单位。"],"miss":["错过；想念","可以表示没有赶上，也可以表示想念某人。"],"missed":["错过了","miss 的过去式，表示没有赶上或错过。"],"mistake":["错误","做错的事情或不正确之处。"],"moment":["片刻；一会儿","很短的一段时间。"],"month":["月；月份","大约四周的一段时间。"],"mother":["母亲","女性家长。"],"move":["移动","改变位置或让身体移动。"],"much":["很多；非常","常用于不可数事物的数量，也可表示程度很高。"],"mushroom":["蘑菇","常见的可食用真菌。"],"mute":["静音","关闭设备声音。"],"name":["名字；名称","用来称呼或识别人、地方、东西的词。"],"nearby":["附近的","距离这里很近。"],"next":["下一个；接下来","表示顺序或时间紧接着的一个。"],"nice":["好的；友好的","表示令人愉快、不错或友好。"],"night":["夜晚","太阳落山到第二天早晨之间的时间。"],"no":["不；没有","用于否定回答或表示没有。"],"noon":["中午","一天中大约十二点的时间。"],"not":["不；没有","用于构成否定。"],"november":["十一月","一年中的第十一个月。"],"now":["现在","当前这个时间。"],"number":["数字；号码","表示数量的符号，也可指电话号码等编号。"],"october":["十月","一年中的第十个月。"],"of":["……的；……中的","常表示所属、关系或部分。"],"off":["关闭；离开","设备中表示关闭，也可表示离开某处或脱离状态。"],"okay":["好的；可以","表示同意、接受或情况没有问题。"],"old":["老的；旧的","年龄较大，也可以表示使用过一段时间。"],"older":["更年长的；更旧的","old 的比较级，表示年龄或时间更大。"],"once":["一次","表示发生一回。"],"onion":["洋葱","常用来做菜的蔬菜。"],"onions":["洋葱（复数）","onion 的复数形式。"],"open":["打开","使关闭的东西变为开放状态。"],"or":["或者","表示两个或多个选择中的一个。"],"orange":["橙子；橙色的","可以指水果，也可以指橙色。"],"ordered":["点了；订购了","order 的过去式，表示已经点餐或订购。"],"other":["其他的","表示另外的、不同的。"],"outside":["外面","建筑物或某个范围之外。"],"over":["在……上方；结束","表示位置在上面，也可表示事情结束。"],"pay":["付款","给钱以购买商品或服务。"],"peach":["桃子","一种柔软多汁的水果。"],"peanuts":["花生（复数）","peanut 的复数形式，一种常见坚果类食物。"],"pear":["梨","常见的甜味水果。"],"pharmacist":["药剂师","在药房配药并提供用药信息的人。"],"pharmacy":["药房","购买或领取药物的地方。"],"phone":["电话；手机","用来通话的设备。"],"pill":["药片","可以吞服的固体药物。"],"pineapple":["菠萝","外皮粗糙、果肉多汁的热带水果。"],"place":["地方；地点","某个具体的位置或区域。"],"police":["警察","负责维护公共安全和处理紧急情况的人员或部门。"],"pork":["猪肉","猪的肉。"],"potato":["土豆","常见的根茎类食物。"],"pound":["磅","英美常用的重量单位，1 磅约等于 454 克。"],"prescription":["处方","医生给出的用药指示或药方。"],"price":["价格","购买商品或服务需要支付的钱数。"],"problem":["问题；困难","需要解决的事情或困难。"],"rain":["雨；下雨","从云中落下的水，也可表示下雨。"],"receipt":["收据","购买后证明付款和商品信息的纸张或电子记录。"],"red":["红色的","一种常见的颜色。"],"refrigerator":["冰箱","用来冷藏或冷冻食物的电器。"],"relative":["亲戚","和自己有家庭或血缘关系的人。"],"remote":["遥控器；远程的","可以指控制设备的遥控器，也可表示距离远。"],"repeat":["重复","再说或再做一次。"],"rest":["休息","停止活动一段时间以恢复体力。"],"return":["退回；返回","把东西送回，也可以表示回到原来的地方。"],"ribs":["排骨；肋骨","可以指带骨头的肉，也可以指身体的肋骨。"],"right":["右边的；正确的","表示方向右边，也可表示正确。"],"ripe":["成熟的","水果已经成熟，可以食用。"],"room":["房间","建筑物中有墙和门的空间。"],"salt":["盐","常用于调味的白色晶体。"],"sausage":["香肠","把肉调味后制成的食品。"],"season":["季节","一年中天气特点相近的一段时间。"],"second":["第二；秒","可以表示顺序第二，也可以表示时间单位秒。"],"september":["九月","一年中的第九个月。"],"seven":["七","数字 7。"],"should":["应该","表示建议、责任或认为某事最好这样做。"],"side":["一边；一侧","物体或地方的某一个边或方向。"],"signal":["信号","手机或其他设备用来连接通信的信号。"],"sister":["姐妹","女性的兄弟姐妹。"],"sit":["坐","让身体处于坐着的姿势。"],"six":["六","数字 6。"],"size":["尺寸；大小","表示物品大小的程度。"],"sleep":["睡觉","身体休息时的状态。"],"slice":["切片；切","把食物切成片，也可表示切片本身。"],"slowly":["慢慢地","以较慢的速度进行。"],"small":["小的；小号的","尺寸或数量比较小。"],"smaller":["更小的","small 的比较级，表示尺寸更小。"],"snow":["雪；下雪","从天空降下的冰晶，也可表示下雪。"],"snows":["下雪","snow 的第三人称单数形式。"],"soda":["汽水","有气泡的甜味饮料。"],"someone":["某人","表示不知道或不说明身份的一个人。"],"son":["儿子","父母的男性孩子。"],"sore":["疼痛的","身体某个部位感到疼痛或不舒服。"],"soup":["汤","用水或汤汁煮成的液体食物。"],"sour":["酸的","味道像柠檬一样带酸味。"],"speak":["说；讲话","用语言表达想法或信息。"],"spicy":["辣的","食物含有明显的辣味。"],"spinach":["菠菜","常见的绿色叶菜。"],"spring":["春天","一年中天气开始变暖、植物生长的季节。"],"start":["开始","从某件事情的起点开始进行。"],"station":["车站","公共交通工具停靠和乘客上下车的地方。"],"stay":["留下；待着；停留","在某个地方继续待着而不离开。"],"steak":["牛排","一块可以煎或烤的牛肉。"],"stomach":["胃；肚子","身体中消化食物的器官，也常指腹部。"],"stop":["停止；站","停止动作，也可以指公交车等停靠的站。"],"store":["商店","出售商品的地方。"],"storm":["暴风雨","风雨很强的天气。"],"stove":["炉子","用来加热和做饭的设备。"],"straight":["直的；直走","不转弯地向前走，也可表示形状直。"],"strawberry":["草莓","红色的小水果。"],"street":["街道","城市中供车辆和行人通行的道路。"],"sugar":["糖","常用来增加甜味的食品。"],"summer":["夏天","一年里天气通常比较热的季节。"],"sunny":["晴朗的","天气有阳光、云比较少。"],"sunshine":["阳光","太阳发出的光。"],"sweet":["甜的","含糖味道明显。"],"symptoms":["症状（复数）","symptom 的复数形式，表示疾病表现。"],"table":["桌子","有平面的家具，可以放东西。"],"take":["拿；带；服用","根据句子可表示拿走、带走或服用药物。"],"tastes":["尝起来；味道","taste 的第三人称单数形式，表示尝起来的味道。"],"tea":["茶","用茶叶冲泡的饮料。"],"tell":["告诉；告知","把信息告诉别人。"],"temperature":["温度","表示冷热程度的数值。"],"ten":["十","数字 10。"],"text":["短信；发短信","可以指文字消息，也可以表示发送文字消息。"],"thicker":["更厚的","thick 的比较级，表示厚度更大。"],"thin":["薄的","厚度比较小。"],"thirsty":["口渴的","感到想喝水。"],"thirty":["三十","数字 30。"],"throat":["喉咙","口腔后方连接呼吸道和食道的身体部位。"],"thunderstorm":["雷雨","伴有雷和雨的天气。"],"ticket":["票","乘坐交通工具或进入某处时使用的凭证。"],"time":["时间；次数","可以表示时间，也可根据语境表示次数。"],"times":["次数；倍数","time 的复数形式，可以表示次数或倍数。"],"tired":["累的","身体或精神需要休息的状态。"],"together":["一起","和别人共同做某事。"],"tomato":["西红柿","常见的红色食材。"],"too":["也；太","可以表示“也”，也可以表示程度超过需要。"],"total":["总数；总价","全部加起来的数量或价格。"],"traffic":["交通","道路上车辆和行人的通行情况。"],"train":["火车","在铁路上运行的公共交通工具。"],"transfer":["换乘；转移","从一种交通工具换到另一种，也可表示转移。"],"try":["尝试","努力做某事以看看能否成功。"],"turkey":["火鸡；火鸡肉","可以指火鸡这种鸟，也可以指它的肉。"],"turning":["转弯；正在转","turn 的现在分词，表示正在改变方向。"],"tv":["电视","用来接收和播放电视节目和视频的设备。"],"twelve":["十二","数字 12。"],"twenty":["二十","数字 20。"],"twice":["两次","表示发生两回。"],"umbrella":["雨伞","下雨时用来遮雨的物品。"],"upstairs":["楼上","建筑物较高的一层或向较高楼层移动。"],"use":["使用","把某个东西用于特定目的。"],"very":["非常","加强形容词或副词的程度。"],"video":["视频","记录或播放动态画面和声音的内容。"],"voicemail":["语音信箱","别人没接电话时留下语音的系统。"],"walk":["走路","用双脚行走。"],"warm":["温暖的","温度比较舒服、不冷。"],"warmer":["更暖和的","warm 的比较级，表示温度更高更暖。"],"watermelon":["西瓜","个头较大的多汁水果。"],"weak":["虚弱的","力量较小或身体没有力气。"],"weather":["天气","某个时间和地点的空气状况。"],"well":["好；健康地","表示状态好，也可表示身体健康。"],"which":["哪一个；哪个","在多个选择中询问其中哪一个。"],"wife":["妻子","结婚关系中的女性配偶。"],"will":["将会；会","表示将来发生的事情或意愿。"],"window":["窗户","墙上的开口，通常可以采光和通风。"],"windy":["有风的","风比较明显的天气。"],"winter":["冬天","一年里通常比较冷的季节。"],"would":["会；愿意；想要","常用于礼貌请求或表示假设，也可表示过去的将来。"],"write":["写","用文字记录信息。"],"wrong":["错误的；不对的","表示答案、做法或事情不正确。"],"year":["年","十二个月组成的时间单位。"],"yellow":["黄色的","一种明亮的颜色。"],"younger":["更年轻的；年龄更小的","young 的比较级，表示年龄较小。"],"nine":["九","数字 9。"],"fourteen":["十四","数字 14。"],"week":["周；星期","七天组成的一段时间。"],"minutes":["分钟（复数）","minute 的复数形式，表示多个一分钟。"]};
 function cleanWord(w){return String(w||'').toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9'-]+$/gi,'');}
 function displayEnglish(text){ return String(text||'').replace(/\bI\b/g,'i'); }
 function wordBreakdown(en){
   return String(en||'').split(/\s+/).filter(Boolean).map((raw,i)=>{
     const word=raw.replace(/[.,!?;:()[\]{}"“”]/g,'').replace(/^I$/,'i');
-    const info=({ ...WORDS, ...V10_WORD_DEFINITIONS })[cleanWord(word)];
+    const info=({ ...WORDS, ...V10_WORD_DEFINITIONS, ...V11_WORD_DEFINITIONS })[cleanWord(word)];
     if(!info) return {id:`${i}-${cleanWord(word)}`,word,meaning:'',explanation:''};
     return {id:`${i}-${cleanWord(word)}`,word,meaning:info[0],explanation:info[1]};
   });
 }
 
 function topicPhrases(topicId) {
-  const rows=[...(DATA[topicId]||[]),...(V9_EXTRA_DATA[topicId]||[]),...(V10_MORE_DATA[topicId]||[])];
+  const rows=[...(DATA[topicId]||[]),...(V9_EXTRA_DATA[topicId]||[]),...(V10_MORE_DATA[topicId]||[]),...(topicId==='new-china'?NEW_CHINA_DATA:[])];
   const seen=new Set();
   const unique=rows.filter(([zh,en])=>{const key=norm(en);if(seen.has(key))return false;seen.add(key);return true;});
   return unique.slice(0,20).map(([zh,en,note], i) => ({ id:`built-${topicId}-${i}`, zh,en,note,category:topicId,correct:0,wrong:0 }));
@@ -615,9 +487,13 @@ function resultCard(x){const words=wordBreakdown(x.en);return `<div class="card 
 
 function savedView(){
   const words=allSavedWords(state.saved);
+  const translations=state.saved.filter(x=>x.source==='translation'||x.category==='custom');
+  const learned=state.saved.filter(x=>!(x.source==='translation'||x.category==='custom'));
+  const sentenceCards=(items,empty)=>items.length?items.map(x=>`<article class="card saved-card"><div class="sentence-display"><div class="en">${escapeHtml(displayEnglish(x.en))}</div><div class="zh">${escapeHtml(x.zh)}</div></div><div class="note">${escapeHtml(x.note||'生活里可以直接用。')}</div><div class="button-row"><button type="button" class="standard-audio-button listen" data-speak="${escapeHtml(x.en)}">听<small class="tap-hint">点击听</small></button><button class="secondary practice-one" data-id="${x.id}">练习</button></div><button class="danger delete-item" data-id="${x.id}" style="width:100%;margin-top:12px">删除这句</button></article>`).join(''):empty;
   return `<section class="hero"><h1>我的英语</h1><p class="muted">这里保存了你想学的内容。</p></section>
-  <div class="saved-tabs"><button type="button" class="saved-tab active" data-saved-tab="sentences">我的句子</button><button type="button" class="saved-tab" data-saved-tab="words">单词（${words.length}）</button></div>
-  <section id="savedSentences">${state.saved.length?state.saved.map(x=>`<article class="card saved-card"><div class="sentence-display"><div class="en">${escapeHtml(displayEnglish(x.en))}</div><div class="zh">${escapeHtml(x.zh)}</div></div><div class="note">${escapeHtml(x.note||'生活里可以直接用。')}</div><div class="button-row"><button type="button" class="standard-audio-button listen" data-speak="${escapeHtml(x.en)}">听<small class="tap-hint">点击听</small></button><button class="secondary practice-one" data-id="${x.id}">练习</button></div><button class="danger delete-item" data-id="${x.id}" style="width:100%;margin-top:12px">删除这句</button></article>`).join(''):`<div class="empty">⭐ 还没有保存英语。<br><br>去“翻译”或者“推荐学习”里保存几句吧。</div>`}</section>
+  <div class="saved-tabs"><button type="button" class="saved-tab active" data-saved-tab="sentences">我的句子</button><button type="button" class="saved-tab" data-saved-tab="translations">我的保存</button><button type="button" class="saved-tab" data-saved-tab="words">单词（${words.length}）</button></div>
+  <section id="savedSentences">${sentenceCards(learned,'<div class="empty">⭐ 还没有保存的学习句子。</div>')}</section>
+  <section id="savedTranslations" class="hidden">${sentenceCards(translations,'<div class="empty">⭐ 还没有保存翻译。去“翻译”保存几句吧。</div>')}</section>
   <section id="savedWords" class="hidden">${words.length?`<p class="muted">这里会把你保存的所有句子拆成单独的词。每个词都可以单独听、单独练习。</p><div class="word-grid saved-word-grid">${words.map(w=>`<button type="button" class="standard-audio-button word-card" data-word-speak="${escapeHtml(w.word)}" data-word-meaning="${escapeHtml(w.meaning)}" data-word-explanation="${escapeHtml(w.explanation)}"><strong>${escapeHtml(displayEnglish(w.word))}</strong><span>${escapeHtml(w.meaning)}</span><small class="tap-hint">点击听</small></button>`).join('')}</div><button type="button" class="big-action" id="practiceAllWords">练习全部单词</button>`:`<div class="empty">保存句子后，这里会自动出现里面的单词。</div>`}</section>`;
 }
 
@@ -635,6 +511,24 @@ function categoryLabel(category){
   return TOPICS.find(t=>t.id===category)?.label || (category==='custom'?'我的句子':category);
 }
 function newPracticeId(){return globalThis.crypto?.randomUUID?.() || `practice-${Date.now()}-${Math.random().toString(16).slice(2)}`;}
+function practiceItemsForCategory(category){
+  if(category==='custom') return (state.saved || []).filter(x=>x.source==='translation'||x.category==='custom').map(x=>({...x,category:'custom'}));
+  if(category==='all'){
+    const builtIn=TOPICS.flatMap(topic=>topicPhrases(topic.id));
+    const saved=(state.saved || []).map(x=>({...x,category:x.category||'custom'}));
+    const seen=new Set();
+    return [...builtIn,...saved].filter(item=>{const key=`${item.category||'custom'}::${norm(item.en)}`;if(seen.has(key))return false;seen.add(key);return true;});
+  }
+  return topicPhrases(category);
+}
+function deletePracticeSession(sessionId){
+  if(!Array.isArray(state.practiceSessions)) return;
+  state.practiceSessions=state.practiceSessions.filter(s=>s.id!==sessionId);
+  if(state.currentPracticeId===sessionId){state.currentPracticeId=null;state.practice=null;}
+  persist();
+  render();
+}
+
 function createPracticeSession(items, category='all', mode='all'){
   const queue=createPracticeQueue(items,mode);
   return {id:newPracticeId(),active:true,queue,index:0,answers:[],startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),category,categoryLabel:categoryLabel(category),type:mode,typeLabel:practiceTypeLabel(mode),clue:queue[0]?.prompt || '生活英语练习'};
@@ -672,7 +566,7 @@ function practiceListView(){
   const cards=sessions.map(s=>{
     const done=s.index>=s.queue.length;
     const clue=s.clue || s.queue?.[s.index]?.prompt || '生活英语练习';
-    return `<article class="card practice-session-card"><div class="practice-session-top"><span class="pill">${escapeHtml(s.categoryLabel||categoryLabel(s.category))}</span><span class="practice-session-type">${escapeHtml(s.typeLabel||practiceTypeLabel(s.type))}</span></div><h3>${escapeHtml(s.categoryLabel||categoryLabel(s.category))} · ${escapeHtml(s.typeLabel||practiceTypeLabel(s.type))}</h3><p class="muted practice-session-clue">${escapeHtml(String(clue))}</p><p class="practice-session-progress">${done?'已完成':`进行到：第 ${Math.min((s.index||0)+1,s.queue.length)} / ${s.queue.length} 题`}</p><button type="button" class="big-action practice-continue" data-practice-id="${escapeHtml(s.id)}">${done?'重新练习':'继续练习 →'}</button></article>`;
+    return `<article class="card practice-session-card"><div class="practice-session-top"><span class="pill">${escapeHtml(s.categoryLabel||categoryLabel(s.category))}</span><span class="practice-session-type">${escapeHtml(s.typeLabel||practiceTypeLabel(s.type))}</span></div><h3>${escapeHtml(s.categoryLabel||categoryLabel(s.category))} · ${escapeHtml(s.typeLabel||practiceTypeLabel(s.type))}</h3><p class="muted practice-session-clue">${escapeHtml(String(clue))}</p><p class="practice-session-progress">${done?'已完成':`进行到：第 ${Math.min((s.index||0)+1,s.queue.length)} / ${s.queue.length} 题`}</p><div class="button-row"><button type="button" class="big-action practice-continue" data-practice-id="${escapeHtml(s.id)}">${done?'重新练习':'继续练习 →'}</button><button type="button" class="danger practice-delete" data-practice-id="${escapeHtml(s.id)}">删除</button></div></article>`;
   }).join('');
   return `<section class="hero"><h1>我的练习</h1><p class="muted">每个练习都会单独保存。可以保存很多个，不会互相覆盖。</p></section>${cards || '<div class="empty">还没有保存的练习。先开始一个练习吧。</div>'}<section class="card new-practice-card"><h2>开始新练习</h2><div class="setting-row"><strong>选择分类</strong><select id="practiceCategory"><option value="all">全部生活英语</option>${TOPICS.map(t=>`<option value="${escapeHtml(t.id)}">${escapeHtml(t.label)}</option>`).join('')}</select></div><div class="setting-row"><strong>练习类型</strong><select id="practiceType"><option value="word">单词意思</option><option value="word-reverse">中文 → 英文</option><option value="word-listen">听单词</option><option value="sentence-order">排列句子</option><option value="sentence-meaning">英文 → 中文</option><option value="sentence-listen">听句子</option><option value="sentence-fill">句子填空</option><option value="sentence-english">中文 → 英文</option></select></div><button type="button" class="big-action" id="startSelectedPractice">开始这个练习</button></section>`;
 }
@@ -734,7 +628,7 @@ function render(){applySettings(); if(route.startsWith('topic:')) view.innerHTML
 function bind(){
   document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>nav(b.dataset.nav));
   document.querySelectorAll('.topic').forEach(b=>b.onclick=()=>{route=`topic:${b.dataset.topic}`;render();});
-  document.querySelectorAll('[data-saved-tab]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-saved-tab]').forEach(x=>x.classList.remove('active'));b.classList.add('active');const words=b.dataset.savedTab==='words';document.querySelector('#savedSentences')?.classList.toggle('hidden',words);document.querySelector('#savedWords')?.classList.toggle('hidden',!words);});
+  document.querySelectorAll('[data-saved-tab]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-saved-tab]').forEach(x=>x.classList.remove('active'));b.classList.add('active');const tab=b.dataset.savedTab;document.querySelector('#savedSentences')?.classList.toggle('hidden',tab!=='sentences');document.querySelector('#savedTranslations')?.classList.toggle('hidden',tab!=='translations');document.querySelector('#savedWords')?.classList.toggle('hidden',tab!=='words');});
   document.querySelector('#practiceAllWords')?.addEventListener('click',()=>{const session=createPracticeSession(state.saved,'all','word');savePracticeSession(session);practiceFeedback=null;persist();nav('practice');});
   document.querySelectorAll('[data-speak]').forEach(b=>{
     b.onclick=(e)=>{
@@ -760,8 +654,9 @@ function bind(){
   document.querySelectorAll('.practice-one').forEach(b=>b.onclick=()=>{const item=state.saved.find(x=>x.id===b.dataset.id);if(!item)return;const session=createPracticeSession([item],item.category||'custom','all');savePracticeSession(session);practiceFeedback=null;persist();nav('practice');});
   document.querySelector('#translateBtn')?.addEventListener('click',doTranslate);
   document.querySelector('#micBtn')?.addEventListener('click',doMic);
-  document.querySelector('#saveCurrent')?.addEventListener('click',()=>{if(currentTranslation){mergePhrase(state,{...currentTranslation,category:'custom',note:'这是你自己翻译并保存的句子。'});persist();document.querySelector('#saveCurrent').textContent='✅ 已保存';}});
-  document.querySelector('#startSelectedPractice')?.addEventListener('click',()=>{const category=document.querySelector('#practiceCategory')?.value||'all';const mode=document.querySelector('#practiceType')?.value||'word';const items=category==='all'?state.saved:state.saved.filter(x=>x.category===category);const session=createPracticeSession(items,category,mode);if(!session.queue.length){alert('这个分类暂时没有适合这种练习的题目。请换一种练习方式。');return;}savePracticeSession(session);practiceFeedback=null;persist();render();});
+  document.querySelector('#saveCurrent')?.addEventListener('click',()=>{if(currentTranslation){mergePhrase(state,{...currentTranslation,category:'custom',source:'translation',note:'这是你自己翻译并保存的句子。'});persist();document.querySelector('#saveCurrent').textContent='✅ 已保存';}});
+  document.querySelectorAll('.practice-delete').forEach(b=>b.onclick=(e)=>{e.preventDefault();e.stopPropagation();if(confirm('确定删除这个练习吗？'))deletePracticeSession(b.dataset.practiceId);});
+  document.querySelector('#startSelectedPractice')?.addEventListener('click',()=>{const category=document.querySelector('#practiceCategory')?.value||'all';const mode=document.querySelector('#practiceType')?.value||'word';const items=practiceItemsForCategory(category);const session=createPracticeSession(items,category,mode);if(!session.queue.length){alert('这个分类暂时没有适合这种练习的题目。请换一种练习方式。');return;}savePracticeSession(session);practiceFeedback=null;persist();render();});
   document.querySelector('#exitPractice')?.addEventListener('click',()=>{const current=currentPractice();if(current){current.active=false;current.updatedAt=new Date().toISOString();savePracticeSession(current);}practiceFeedback=null;persist();render();});
   document.querySelectorAll('.practice-option').forEach(b=>b.onclick=()=>answerQuestion(b.dataset.answer));
   bindOrderPractice();
@@ -852,7 +747,7 @@ function answerTone(correct){
       osc.frequency.setValueAtTime(190,now+0.12);
     }
     gain.gain.setValueAtTime(0.0001,now);
-    gain.gain.exponentialRampToValueAtTime(0.13,now+0.015);
+    gain.gain.exponentialRampToValueAtTime(0.24,now+0.015);
     gain.gain.exponentialRampToValueAtTime(0.0001,now+0.22);
     osc.start(now); osc.stop(now+0.24);
     setTimeout(()=>ctx.close?.(),350);
