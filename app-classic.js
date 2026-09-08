@@ -39,6 +39,7 @@ function loadState(storage = globalThis.localStorage) {
     const parsed = JSON.parse(raw);
     if (!validateBackup(parsed)) return defaultState();
     if (!Array.isArray(parsed.practiceSessions)) parsed.practiceSessions = parsed.practice ? [parsed.practice] : [];
+    repairPracticeSessions(parsed.practiceSessions);
     parsed.currentPracticeId = parsed.currentPracticeId || parsed.practiceSessions.at(-1)?.id || null;
     parsed.practice = parsed.practiceSessions.find(x => x.id === parsed.currentPracticeId) || parsed.practice || null;
     return parsed;
@@ -75,6 +76,20 @@ function mergePhrase(state, phrase) {
 function createBackupPayload(state) {
   return JSON.parse(JSON.stringify({ ...state, version: 1 }));
 }
+function repairPracticeSessionOptions(session){
+  if(!session||!Array.isArray(session.queue))return session;
+  session.queue.forEach(q=>{
+    if(!Array.isArray(q?.options)||!q.options.length||q.answer==null)return;
+    const pool=q.options.filter(option=>norm(option)!==norm(q.answer));
+    q.options=practiceChoices(q.answer,pool,[]);
+  });
+  return session;
+}
+function repairPracticeSessions(sessions){
+  if(Array.isArray(sessions))sessions.forEach(repairPracticeSessionOptions);
+  return sessions;
+}
+
 
 function validateBackup(value) {
   if (!value || value.version !== 1) return false;
@@ -381,16 +396,25 @@ function allSavedWords(saved){
   return words;
 }
 function tokenizeSentence(en){return String(en||'').trim().replace(/[.!?]+$/,'').split(/\s+/).filter(Boolean).map((text,index)=>({id:`token-${index}-${text.toLowerCase()}`,text}));}
+function choiceMeaningParts(value){
+  return norm(value).split(/[;；、,，/|]+/).map(part=>part.trim()).filter(Boolean);
+}
+function choicesHaveSameMeaning(a,b){
+  const left=new Set(choiceMeaningParts(a));
+  return choiceMeaningParts(b).some(part=>left.has(part));
+}
 function practiceChoices(correct,pool=[],fallback=[]){
-  const unique=[correct,...pool,...fallback].filter((x,i,a)=>x&&a.indexOf(x)===i);
-  const choices=shuffleCopy(unique.slice(0,4));
-  // Keep the correct answer from being predictably first. With four choices,
-  // it is still randomly positioned among the remaining slots.
-  if(choices.length>1 && choices[0]===correct){
-    const swapIndex=1+Math.floor(Math.random()*(choices.length-1));
-    [choices[0],choices[swapIndex]]=[choices[swapIndex],choices[0]];
+  const correctText=String(correct||'').trim();
+  if(!correctText)return [];
+  const candidates=shuffleCopy([...pool,...fallback]).map(x=>String(x||'').trim()).filter(Boolean);
+  const chosen=[correctText];
+  for(const candidate of candidates){
+    if(norm(candidate)===norm(correctText))continue;
+    if(chosen.some(existing=>choicesHaveSameMeaning(existing,candidate)))continue;
+    chosen.push(candidate);
+    if(chosen.length>=4)break;
   }
-  return choices;
+  return shuffleCopy(chosen);
 }
 function createPracticeQueue(items,mode='all'){
   const usable=items.filter(x=>x&&x.zh&&x.en);
@@ -430,24 +454,40 @@ function applyPracticeResult(saved, sourceId, correct) {
   else item.wrong = Number(item.wrong || 0) + 1;
 }
 
-function normalizeRecognizedText(text) { return String(text || '').trim(); }
-function getRecognitionConstructor(scope = globalThis) {
-  return scope?.SpeechRecognition || scope?.webkitSpeechRecognition || null;
+function normalizeRecognizedText(text){return String(text||'').trim();}
+function isStandalonePWA(scope=globalThis){
+  try{return Boolean(scope?.navigator?.standalone)||Boolean(scope?.matchMedia?.('(display-mode: standalone)')?.matches);}catch(_){return false;}
 }
-function isRecognitionSupported(scope = globalThis) { return Boolean(getRecognitionConstructor(scope)); }
-function startChineseRecognition({ onStart, onText, onError, onEnd } = {}, scope = globalThis) {
-  const Ctor = getRecognitionConstructor(scope);
-  if (!Ctor) throw new Error('这个浏览器不支持语音输入，请用打字。');
-  const recognition = new Ctor();
-  recognition.lang = 'zh-CN';
-  recognition.interimResults = false;
-  recognition.continuous = false;
-  recognition.maxAlternatives = 1;
-  recognition.onstart = () => onStart?.();
-  recognition.onresult = e => onText?.(normalizeRecognizedText(e.results?.[0]?.[0]?.transcript || ''));
-  recognition.onerror = e => onError?.(e.error || '语音输入失败');
-  recognition.onend = () => onEnd?.();
-  recognition.start();
+function getRecognitionConstructor(scope=globalThis){return scope?.SpeechRecognition||scope?.webkitSpeechRecognition||null;}
+function isRecognitionSupported(scope=globalThis){
+  if(isStandalonePWA(scope))return false;
+  return Boolean(getRecognitionConstructor(scope));
+}
+function recognitionErrorMessage(error){
+  switch(String(error||'').toLowerCase()){
+    case 'not-allowed':
+    case 'service-not-allowed': return '手机语音输入没有获得权限。请用 Safari 打开，并确认 iPhone 已开启 Siri 或“听写”，再允许此网站使用语音输入。';
+    case 'audio-capture': return '没有找到可用的麦克风。请检查 iPhone 的麦克风权限后再试。';
+    case 'network': return '语音识别服务需要网络连接。请检查网络后再试。';
+    case 'no-speech': return '没有听到声音。请靠近手机说一句中文，再试一次。';
+    case 'aborted': return '语音输入被中断了，请再点一次“说中文”。';
+    default: return '语音输入暂时没有成功。请再点一次“说中文”，或者直接打字。';
+  }
+}
+function startChineseRecognition({onStart,onText,onError,onEnd}={},scope=globalThis){
+  if(isStandalonePWA(scope))throw new Error('iPhone 主屏幕版暂时不能使用网页语音识别。请用 Safari 浏览器打开这个网站，再点“说中文”。');
+  const Ctor=getRecognitionConstructor(scope);
+  if(!Ctor)throw new Error('这个浏览器不支持语音输入，请用 Safari 打开后再试。');
+  const recognition=new Ctor();
+  recognition.lang='zh-CN';
+  recognition.interimResults=false;
+  recognition.continuous=false;
+  recognition.maxAlternatives=1;
+  recognition.onstart=()=>onStart?.();
+  recognition.onresult=e=>{const text=normalizeRecognizedText(e.results?.[0]?.[0]?.transcript||'');if(text)onText?.(text);};
+  recognition.onerror=e=>onError?.(e.error||'unknown',e);
+  recognition.onend=()=>onEnd?.();
+  try{recognition.start();}catch(error){onError?.(error?.name||'unknown',error);onEnd?.();}
   return recognition;
 }
 let translatorPromise;
@@ -802,7 +842,23 @@ function bindOrderPractice(){
 }
 
 async function doTranslate(){const input=document.querySelector('#zhInput');const status=document.querySelector('#status');const text=input?.value?.trim();if(!text){status.textContent='请先说一句中文，或者打字。';return;}try{status.textContent='正在准备…';const en=await translateZhToEn(text,msg=>{status.textContent=msg});currentTranslation={zh:text,en};status.textContent='翻译好了。';document.querySelector('#resultArea').innerHTML=resultCard(currentTranslation);bind();}catch(e){status.textContent=e.message||'翻译失败，请再试一次。';}}
-function doMic(){const status=document.querySelector('#status');if(!isRecognitionSupported()){status.textContent='这个浏览器不能用语音输入，请直接打字。';return;}try{startChineseRecognition({onStart:()=>{status.textContent='正在听…说完一句就可以。';document.querySelector('#micBtn').textContent='🎙️ 正在听';},onText:text=>{document.querySelector('#zhInput').value=text;status.textContent='听到了，正在翻译…';doTranslate();},onError:()=>{status.textContent='没有听清楚。可以再说一次，或者打字。';},onEnd:()=>{const b=document.querySelector('#micBtn');if(b)b.textContent='🎤 说中文';}});}catch(e){status.textContent=e.message;}}
+function doMic(){
+  const status=document.querySelector('#status');
+  const button=document.querySelector('#micBtn');
+  if(!status||!button)return;
+  if(!isRecognitionSupported()){
+    status.textContent=isStandalonePWA()?'iPhone 主屏幕版暂时不能使用语音识别。请在 Safari 中打开这个网站。':'这个浏览器不能用语音输入，请用 Safari 打开后再试。';
+    return;
+  }
+  button.disabled=true;
+  button.textContent='🎙️ 正在准备…';
+  try{startChineseRecognition({
+    onStart:()=>{status.textContent='正在听…说完一句就可以。';button.textContent='🎙️ 正在听';},
+    onText:text=>{document.querySelector('#zhInput').value=text;status.textContent='听到了，正在翻译…';doTranslate();},
+    onError:error=>{status.textContent=recognitionErrorMessage(error);},
+    onEnd:()=>{button.disabled=false;button.textContent='🎤 说中文';},
+  });}catch(e){button.disabled=false;button.textContent='🎤 说中文';status.textContent=e?.message||recognitionErrorMessage(e?.name);}
+}
 let feedbackAudio = null;
 function answerTone(correct){
   try{
@@ -854,4 +910,4 @@ function answerQuestion(answer){
 }
 
 render();
-if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js?v=55').catch(()=>{}));
+if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js?v=56').catch(()=>{}));
