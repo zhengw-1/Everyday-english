@@ -381,7 +381,7 @@ function allSavedWords(saved){
   return words;
 }
 function tokenizeSentence(en){return String(en||'').trim().replace(/[.!?]+$/,'').split(/\s+/).filter(Boolean).map((text,index)=>({id:`token-${index}-${text.toLowerCase()}`,text}));}
-function practiceChoices(correct,pool=[],fallback=[]){return [correct,...pool,...fallback].filter((x,i,a)=>x&&a.indexOf(x)===i).slice(0,4);}
+function practiceChoices(correct,pool=[],fallback=[]){return shuffleCopy([correct,...pool,...fallback].filter((x,i,a)=>x&&a.indexOf(x)===i).slice(0,4));}
 function createPracticeQueue(items,mode='all'){
   const usable=items.filter(x=>x&&x.zh&&x.en);
   const words=allSavedWords(usable);
@@ -441,27 +441,59 @@ function startChineseRecognition({ onStart, onText, onError, onEnd } = {}, scope
   return recognition;
 }
 let translatorPromise;
+const TRANSLATOR_TIMEOUT_MS = 45000;
+
+function translationWithTimeout(work, message) {
+  return Promise.race([
+    Promise.resolve(work),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), TRANSLATOR_TIMEOUT_MS)),
+  ]);
+}
+
+async function loadFreeTranslator(onProgress) {
+  const { pipeline, env } = await translationWithTimeout(
+    import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/+esm'),
+    '免费翻译工具加载太久了，请检查网络后再试一次。'
+  );
+  env.allowLocalModels = false;
+  try {
+    return await translationWithTimeout(
+      pipeline('translation', 'Xenova/opus-mt-zh-en', { dtype: 'q8' }),
+      '免费翻译工具下载太久了。'
+    );
+  } catch (_) {
+    onProgress('正在尝试更轻的免费翻译工具…');
+    return translationWithTimeout(
+      pipeline('translation', 'Xenova/opus-mt-zh-en', { dtype: 'q4' }),
+      '免费翻译工具还是没有准备好，请稍后再试一次。'
+    );
+  }
+}
 
 async function translateZhToEn(text, onProgress = () => {}) {
   const input = String(text || '').trim();
   if (!input) throw new Error('请先说一句中文，或者打字。');
   if (!translatorPromise) {
     onProgress('第一次使用正在下载免费翻译工具，可能需要一点时间…');
-    translatorPromise = (async () => {
-      const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/+esm');
-      env.allowLocalModels = false;
-      return pipeline('translation', 'Xenova/opus-mt-zh-en', { dtype: 'q8' });
-    })();
+    translatorPromise = loadFreeTranslator(onProgress);
   } else {
     onProgress('正在翻译…');
   }
-  const translator = await translatorPromise;
-  const result = await translator(input, { max_new_tokens: 128 });
-  const output = Array.isArray(result) ? result[0] : result;
-  const translated = output?.translation_text || output?.generated_text || '';
-  if (!translated) throw new Error('这次没有翻译成功，请再试一次。');
-  onProgress('');
-  return translated.trim();
+  try {
+    const translator = await translatorPromise;
+    const result = await translationWithTimeout(
+      translator(input, { max_new_tokens: 128 }),
+      '翻译太久没有完成，请再试一次。'
+    );
+    const output = Array.isArray(result) ? result[0] : result;
+    const translated = output?.translation_text || output?.generated_text || '';
+    if (!translated) throw new Error('这次没有翻译成功，请再试一次。');
+    onProgress('');
+    return translated.trim();
+  } catch (error) {
+    translatorPromise = null;
+    throw error;
+  }
 }
 
 
@@ -562,7 +594,7 @@ function resumePracticeSession(sessionId){
   return true;
 }
 function practiceListView(){
-  const sessions=(state.practiceSessions || []).filter(s=>s.type!=='all');
+  const sessions=(state.practiceSessions || []);
   const cards=sessions.map(s=>{
     const done=s.index>=s.queue.length;
     const clue=s.clue || s.queue?.[s.index]?.prompt || '生活英语练习';
@@ -572,7 +604,6 @@ function practiceListView(){
 }
 
 function practiceView(){
-  if(!state.saved.length)return `<section class="hero"><h1>练习</h1><p class="muted">先保存几句自己想学的英语，再来练习。</p></section><button class="big-action" data-nav="home">去学几句</button>`;
   const current=currentPractice();
   if(!current || !current.active) return practiceListView();
   const q=current.queue[current.index];
@@ -776,4 +807,4 @@ function answerQuestion(answer){
 }
 
 render();
-if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js?v=54').catch(()=>{}));
