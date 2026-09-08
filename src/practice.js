@@ -11,8 +11,12 @@ export function evaluateAnswer(question, answer) {
   return norm(question.answer) === norm(answer);
 }
 
+function shuffleCopy(items) {
+  return [...items].sort(() => Math.random() - 0.5);
+}
+
 function choices(correct, pool = [], fallback = []) {
-  return [correct, ...pool, ...fallback].filter((x, i, a) => x && a.indexOf(x) === i).slice(0, 4);
+  return shuffleCopy([correct, ...pool, ...fallback].filter((x, i, a) => x && a.indexOf(x) === i).slice(0, 4));
 }
 
 export function createPracticeQueue(items, mode = 'all') {
