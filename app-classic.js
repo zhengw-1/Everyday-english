@@ -537,12 +537,10 @@ function startChineseRecognition({onStart,onText,onError,onEnd}={},scope=globalT
   recognition.interimResults=false;
   recognition.continuous=false;
   recognition.maxAlternatives=1;
-  let micStream=null;
   let ended=false;
   const finish=()=>{
     if(ended)return;
     ended=true;
-    try{micStream?.getTracks?.().forEach(track=>track.stop());}catch(_){}
     onEnd?.();
   };
   recognition.onstart=()=>onStart?.();
@@ -552,17 +550,17 @@ function startChineseRecognition({onStart,onText,onError,onEnd}={},scope=globalT
   };
   recognition.onerror=e=>onError?.(e.error||'unknown',e);
   recognition.onend=finish;
-  (async()=>{
-    try{
-      micStream=await primeIOSMicrophone(scope);
-      if(isIOSLike(scope)) await new Promise(resolve=>setTimeout(resolve,350));
-      recognition.start();
-    }catch(error){
-      try{micStream?.getTracks?.().forEach(track=>track.stop());}catch(_){}
-      onError?.(error?.name||'unknown',error);
-      finish();
-    }
-  })();
+
+  // IMPORTANT for iPhone/iPad: SpeechRecognition.start() must happen while
+  // the user's tap still has transient user activation. The previous V58
+  // code awaited getUserMedia() first, which moved recognition.start() out
+  // of the tap and caused iOS Safari/Home Screen recognition to fail.
+  try{
+    recognition.start();
+  }catch(error){
+    onError?.(error?.name||'unknown',error);
+    finish();
+  }
   return recognition;
 }
 let translatorPromise;
