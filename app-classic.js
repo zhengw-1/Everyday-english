@@ -482,36 +482,87 @@ function normalizeRecognizedText(text){return String(text||'').trim();}
 function isStandalonePWA(scope=globalThis){
   try{return Boolean(scope?.navigator?.standalone)||Boolean(scope?.matchMedia?.('(display-mode: standalone)')?.matches);}catch(_){return false;}
 }
-function getRecognitionConstructor(scope=globalThis){return scope?.SpeechRecognition||scope?.webkitSpeechRecognition||null;}
+function getRecognitionConstructor(scope=globalThis){
+  return scope?.SpeechRecognition||scope?.webkitSpeechRecognition||null;
+}
 function isRecognitionSupported(scope=globalThis){
-  if(isStandalonePWA(scope))return false;
+  // Safari/iOS can expose Web Speech only in the page context. Do not reject
+  // standalone/Home Screen mode up front; newer iOS versions can run the API
+  // there when WebKit exposes it.
   return Boolean(getRecognitionConstructor(scope));
 }
 function recognitionErrorMessage(error){
   switch(String(error||'').toLowerCase()){
     case 'not-allowed':
-    case 'service-not-allowed': return '手机语音输入没有获得权限。请用 Safari 打开，并确认 iPhone 已开启 Siri 或“听写”，再允许此网站使用语音输入。';
-    case 'audio-capture': return '没有找到可用的麦克风。请检查 iPhone 的麦克风权限后再试。';
-    case 'network': return '语音识别服务需要网络连接。请检查网络后再试。';
-    case 'no-speech': return '没有听到声音。请靠近手机说一句中文，再试一次。';
-    case 'aborted': return '语音输入被中断了，请再点一次“说中文”。';
-    default: return '语音输入暂时没有成功。请再点一次“说中文”，或者直接打字。';
+    case 'service-not-allowed':
+      return '手机语音输入没有获得权限。请确认 Siri/听写已开启，并允许此网站使用麦克风和语音识别。';
+    case 'audio-capture':
+      return '没有找到可用的麦克风。请检查 iPhone 的麦克风权限后再试。';
+    case 'network':
+      return '语音识别服务需要网络连接。请检查网络后再试。';
+    case 'no-speech':
+      return '没有听到声音。请靠近手机说一句中文，再试一次。';
+    case 'aborted':
+      return '语音输入被中断了，请再点一次“说中文”。';
+    case 'language-not-supported':
+      return '这个设备暂时不能使用中文语音识别。';
+    default:
+      return '语音输入暂时没有成功。请再点一次“说中文”，或者直接打字。';
+  }
+}
+async function primeIOSMicrophone(scope=globalThis){
+  if(!isIOSLike(scope)) return null;
+  const getUserMedia=scope?.navigator?.mediaDevices?.getUserMedia;
+  if(typeof getUserMedia!=='function') return null;
+  try{
+    // WebKit/iOS 26 has a known SpeechRecognition/media interaction issue.
+    // A short getUserMedia prime before starting recognition makes the audio
+    // capture path explicit and avoids the common "mic is allowed but no
+    // recognition result" state.
+    const stream=await getUserMedia.call(scope.navigator,{audio:true});
+    return stream;
+  }catch(error){
+    const name=error?.name||'unknown';
+    if(name==='NotAllowedError'||name==='PermissionDeniedError'){
+      throw new Error('手机没有允许语音输入。请在 iPhone 设置 → Safari → 麦克风中选择“允许”，然后再试一次。');
+    }
+    throw error;
   }
 }
 function startChineseRecognition({onStart,onText,onError,onEnd}={},scope=globalThis){
-  if(isStandalonePWA(scope))throw new Error('iPhone 主屏幕版暂时不能使用网页语音识别。请用 Safari 浏览器打开这个网站，再点“说中文”。');
   const Ctor=getRecognitionConstructor(scope);
-  if(!Ctor)throw new Error('这个浏览器不支持语音输入，请用 Safari 打开后再试。');
+  if(!Ctor)throw new Error('这个浏览器没有提供语音识别功能。请用 iPhone Safari 打开此网页；如果仍然不能使用，请更新 iOS。');
   const recognition=new Ctor();
   recognition.lang='zh-CN';
   recognition.interimResults=false;
   recognition.continuous=false;
   recognition.maxAlternatives=1;
+  let micStream=null;
+  let ended=false;
+  const finish=()=>{
+    if(ended)return;
+    ended=true;
+    try{micStream?.getTracks?.().forEach(track=>track.stop());}catch(_){}
+    onEnd?.();
+  };
   recognition.onstart=()=>onStart?.();
-  recognition.onresult=e=>{const text=normalizeRecognizedText(e.results?.[0]?.[0]?.transcript||'');if(text)onText?.(text);};
+  recognition.onresult=e=>{
+    const text=normalizeRecognizedText(e.results?.[0]?.[0]?.transcript||'');
+    if(text)onText?.(text);
+  };
   recognition.onerror=e=>onError?.(e.error||'unknown',e);
-  recognition.onend=()=>onEnd?.();
-  try{recognition.start();}catch(error){onError?.(error?.name||'unknown',error);onEnd?.();}
+  recognition.onend=finish;
+  (async()=>{
+    try{
+      micStream=await primeIOSMicrophone(scope);
+      if(isIOSLike(scope)) await new Promise(resolve=>setTimeout(resolve,350));
+      recognition.start();
+    }catch(error){
+      try{micStream?.getTracks?.().forEach(track=>track.stop());}catch(_){}
+      onError?.(error?.name||'unknown',error);
+      finish();
+    }
+  })();
   return recognition;
 }
 let translatorPromise;
@@ -875,7 +926,7 @@ function doMic(){
   const button=document.querySelector('#micBtn');
   if(!status||!button)return;
   if(!isRecognitionSupported()){
-    status.textContent=isStandalonePWA()?'iPhone 主屏幕版暂时不能使用语音识别。请在 Safari 中打开这个网站。':'这个浏览器不能用语音输入，请用 Safari 打开后再试。';
+    status.textContent='这个浏览器没有提供语音识别功能。请用 iPhone Safari 打开此网页，或更新 iOS。';
     return;
   }
   button.disabled=true;

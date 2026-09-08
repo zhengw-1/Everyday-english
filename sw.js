@@ -1,5 +1,5 @@
-// V57: keep only the icon cached. HTML, JavaScript, CSS, and lesson audio use the network path.
-const CACHE='elder-english-static-v57';
+// V58: keep only the icon cached. HTML, JavaScript, CSS, and lesson audio use the network path.
+const CACHE='elder-english-static-v58';
 const ROOT=new URL(self.registration.scope).pathname.replace(/\/$/,'');
 const STATIC_ASSETS=[`${ROOT}/icon.svg`];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(STATIC_ASSETS)).then(()=>self.skipWaiting())));
