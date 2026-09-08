@@ -102,14 +102,38 @@ function validateBackup(value) {
   return value.saved.every(x => x && typeof x.zh === 'string' && typeof x.en === 'string');
 }
 
-function downloadBackup(state) {
+async function downloadBackup(state) {
+  const filename = `生活英语备份-${new Date().toISOString().slice(0,10)}.json`;
   const blob = new Blob([JSON.stringify(createBackupPayload(state), null, 2)], { type: 'application/json' });
+  const file = new File([blob], filename, { type: 'application/json' });
+
+  // On iPhone/iPad, use the native share sheet when file sharing is supported.
+  // This lets the user choose “Save to Files” and then pick “On My iPhone”
+  // instead of relying on Safari's Downloads folder.
+  if (navigator.share && navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({
+        files: [file],
+        title: '生活英语备份',
+        text: '建议保存到“文件”App → On My iPhone → Everyday English Backups。'
+      });
+      return 'shared';
+    } catch (err) {
+      // Closing the share sheet is not an error. Do not fall back to a
+      // download after the user intentionally cancelled the share sheet.
+      if (err?.name === 'AbortError') return false;
+      // If native sharing fails for another reason, keep the old download
+      // fallback so desktop/older browsers can still create a backup.
+    }
+  }
+
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `生活英语备份-${new Date().toISOString().slice(0,10)}.json`;
+  a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return 'downloaded';
 }
 
 async function readBackupFile(file) {
@@ -732,7 +756,7 @@ function feedbackHtml(q,f){
   return `<div class="feedback ${f.correct?'correct':'wrong'}"><strong>${f.correct?'✓ 对了！':'✕ 还差一点'}</strong><div class="feedback-answer">${escapeHtml(english)}</div><div class="feedback-translation">${escapeHtml(chinese)}</div>${!f.correct?`<div class="feedback-hint">正确答案：${escapeHtml(isWord?q.answer:english)}</div>`:''}<div class="word-learning practice-breakdown"><h3>${isWord?'单词解释':'句子里的单词'}</h3><div class="word-grid">${words.map(w=>`<div class="word-explanation"><strong>${escapeHtml(displayEnglish(w.word))}</strong><span>${escapeHtml(w.meaning)}</span><small>${escapeHtml(w.explanation)}</small></div>`).join('')}</div></div><div class="button-row"><button type="button" class="standard-audio-button listen" data-speak="${escapeHtml(english)}">听答案<small class="tap-hint">点击听</small></button><button class="secondary" id="retryQuestion">再练一次</button></div><button class="big-action" id="nextQuestion" style="margin-top:12px">下一题 →</button></div>`;
 }
 
-function settingsView(){return `<section class="hero"><h1>设置</h1><p class="muted">只放最需要的设置。</p></section><div class="card"><div class="setting-row"><strong>字体大小</strong><select id="textSize"><option value="large" ${state.settings.textSize==='large'?'selected':''}>大</option><option value="xlarge" ${state.settings.textSize==='xlarge'?'selected':''}>特大</option></select></div><div class="setting-row"><strong>英文朗读速度</strong><select id="voiceRate"><option value="0.68" ${state.settings.voiceRate===0.68?'selected':''}>很慢</option><option value="0.82" ${state.settings.voiceRate===0.82?'selected':''}>慢</option><option value="1" ${state.settings.voiceRate===1?'selected':''}>正常</option></select></div></div><button class="big-action secondary" id="backupBtn">⬇️ Backup 备份</button><div style="height:12px"></div><label class="big-action secondary" style="display:flex;align-items:center;justify-content:center;cursor:pointer">⬆️ Restore 恢复<input id="restoreInput" type="file" accept="application/json" class="hidden"></label><div style="height:28px"></div><button class="big-action danger" id="clearBtn">清除全部学习数据</button><p class="muted">Backup 会保存：我的英语、练习进度、答对/答错记录和设置。</p>`}
+function settingsView(){return `<section class="hero"><h1>设置</h1><p class="muted">只放最需要的设置。</p></section><div class="card"><div class="setting-row"><strong>字体大小</strong><select id="textSize"><option value="large" ${state.settings.textSize==='large'?'selected':''}>大</option><option value="xlarge" ${state.settings.textSize==='xlarge'?'selected':''}>特大</option></select></div><div class="setting-row"><strong>英文朗读速度</strong><select id="voiceRate"><option value="0.68" ${state.settings.voiceRate===0.68?'selected':''}>很慢</option><option value="0.82" ${state.settings.voiceRate===0.82?'selected':''}>慢</option><option value="1" ${state.settings.voiceRate===1?'selected':''}>正常</option></select></div></div><div class="card"><strong>💾 备份学习数据</strong><p class="muted" style="margin:8px 0 0">建议保存到“文件”App → <b>On My iPhone</b> → Everyday English Backups，不占用 iCloud 空间。</p></div><button class="big-action secondary" id="backupBtn">💾 Backup 备份</button><div style="height:12px"></div><label class="big-action secondary" style="display:flex;align-items:center;justify-content:center;cursor:pointer">♻️ Restore 恢复<input id="restoreInput" type="file" accept="application/json" class="hidden"></label><p class="muted" style="margin-top:10px">恢复时请选择之前保存的“生活英语备份”文件。恢复会替换当前学习数据。</p><div style="height:28px"></div><button class="big-action danger" id="clearBtn">清除全部学习数据</button><p class="muted">Backup 会保存：我的英语、练习进度、答对/答错记录和设置。</p>`}
 
 function topicView(topicId){const topic=TOPICS.find(t=>t.id===topicId);const phrases=topicPhrases(topicId);if(!topic)return `<section class="hero"><h1>找不到这个分类</h1></section>`;return `<section class="hero"><button type="button" class="secondary" data-nav="categories">← 返回分类</button><div class="topic-heading"><span class="icon">${topic.icon}</span><h1>${escapeHtml(topic.label)}</h1></div></section><div class="topic-list">${phrases.map(item=>`<article class="card topic-phrase"><div class="en sentence-full">${escapeHtml(displayEnglish(item.en))}</div><div class="zh">${escapeHtml(item.zh)}</div><h3 class="word-section-title">点每个词听一听</h3><div class="sentence-word-row">${sentenceWordCards(item.en)}</div><div class="note">${escapeHtml(item.note||'生活里可以直接用。')}</div><div class="button-row"><button type="button" class="standard-audio-button listen" data-speak="${escapeHtml(item.en)}">听整句<small class="tap-hint">点击听</small></button><button type="button" class="secondary built-save" data-topic="${escapeHtml(topicId)}" data-zh="${escapeHtml(item.zh)}" data-en="${escapeHtml(item.en)}" data-note="${escapeHtml(item.note||'生活里可以直接用。')}">保存</button></div></article>`).join('')}</div>`}
 
@@ -777,7 +801,11 @@ function bind(){
   document.querySelector('#nextQuestion')?.addEventListener('click',()=>{const current=currentPractice();if(!current)return;current.index++;current.updatedAt=new Date().toISOString();savePracticeSession(current);practiceFeedback=null;persist();render();});
   document.querySelector('#textSize')?.addEventListener('change',e=>{state.settings.textSize=e.target.value;persist();render();});
   document.querySelector('#voiceRate')?.addEventListener('change',e=>{state.settings.voiceRate=Number(e.target.value);persist();});
-  document.querySelector('#backupBtn')?.addEventListener('click',()=>downloadBackup(state));
+  document.querySelector('#backupBtn')?.addEventListener('click',async()=>{
+    const result=await downloadBackup(state);
+    if(result==='shared') alert('备份已完成。建议在“文件”App 中检查 On My iPhone → Everyday English Backups。');
+    else if(result==='downloaded') alert('备份文件已下载。请在“文件”App 的 Downloads 中找到它。');
+  });
   document.querySelector('#restoreInput')?.addEventListener('change',async e=>{try{const restored=await readBackupFile(e.target.files[0]);state=restored;persist();alert('恢复成功。');render();}catch(err){alert(err.message||'恢复失败。');}});
   document.querySelector('#clearBtn')?.addEventListener('click',()=>{if(confirm('确定要清除全部学习内容吗？这个操作不能撤销。')){state=defaultState();persist();render();}});
 }
