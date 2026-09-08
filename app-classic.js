@@ -381,7 +381,17 @@ function allSavedWords(saved){
   return words;
 }
 function tokenizeSentence(en){return String(en||'').trim().replace(/[.!?]+$/,'').split(/\s+/).filter(Boolean).map((text,index)=>({id:`token-${index}-${text.toLowerCase()}`,text}));}
-function practiceChoices(correct,pool=[],fallback=[]){return shuffleCopy([correct,...pool,...fallback].filter((x,i,a)=>x&&a.indexOf(x)===i).slice(0,4));}
+function practiceChoices(correct,pool=[],fallback=[]){
+  const unique=[correct,...pool,...fallback].filter((x,i,a)=>x&&a.indexOf(x)===i);
+  const choices=shuffleCopy(unique.slice(0,4));
+  // Keep the correct answer from being predictably first. With four choices,
+  // it is still randomly positioned among the remaining slots.
+  if(choices.length>1 && choices[0]===correct){
+    const swapIndex=1+Math.floor(Math.random()*(choices.length-1));
+    [choices[0],choices[swapIndex]]=[choices[swapIndex],choices[0]];
+  }
+  return choices;
+}
 function createPracticeQueue(items,mode='all'){
   const usable=items.filter(x=>x&&x.zh&&x.en);
   const words=allSavedWords(usable);
@@ -450,6 +460,21 @@ function translationWithTimeout(work, message) {
   ]);
 }
 
+function isIOSLike(scope=globalThis){
+  const ua=scope?.navigator?.userAgent || '';
+  return /iPhone|iPad|iPod/i.test(ua) || (scope?.navigator?.platform==='MacIntel' && (scope?.navigator?.maxTouchPoints||0)>1);
+}
+
+async function translateWithFreeWebFallback(input){
+  const url='https://api.mymemory.translated.net/get?q='+encodeURIComponent(input)+'&langpair=zh-CN|en';
+  const response=await fetch(url,{method:'GET',headers:{Accept:'application/json'}});
+  if(!response.ok) throw new Error('网络翻译暂时不可用。');
+  const data=await response.json();
+  const translated=data?.responseData?.translatedText || '';
+  if(!translated) throw new Error('这次没有翻译成功，请再试一次。');
+  return translated.trim();
+}
+
 async function loadFreeTranslator(onProgress) {
   const { pipeline, env } = await translationWithTimeout(
     import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/+esm'),
@@ -473,26 +498,36 @@ async function loadFreeTranslator(onProgress) {
 async function translateZhToEn(text, onProgress = () => {}) {
   const input = String(text || '').trim();
   if (!input) throw new Error('请先说一句中文，或者打字。');
-  if (!translatorPromise) {
+  // iPhone/iPad Safari gets the lightweight web fallback first. The browser
+  // ML model is still retained for desktop and for offline-capable use.
+  if(isIOSLike()){
+    onProgress('手机正在使用轻量免费翻译…');
+    try{return await translationWithTimeout(translateWithFreeWebFallback(input),'翻译网络请求太久，请检查网络后再试一次。');}
+    catch(_){onProgress('手机翻译正在尝试本地工具…');}
+  }
+  if(!translatorPromise) {
     onProgress('第一次使用正在下载免费翻译工具，可能需要一点时间…');
-    translatorPromise = loadFreeTranslator(onProgress);
+    translatorPromise=loadFreeTranslator(onProgress);
   } else {
     onProgress('正在翻译…');
   }
   try {
-    const translator = await translatorPromise;
-    const result = await translationWithTimeout(
-      translator(input, { max_new_tokens: 128 }),
-      '翻译太久没有完成，请再试一次。'
-    );
-    const output = Array.isArray(result) ? result[0] : result;
-    const translated = output?.translation_text || output?.generated_text || '';
-    if (!translated) throw new Error('这次没有翻译成功，请再试一次。');
+    const translator=await translatorPromise;
+    const result=await translationWithTimeout(translator(input,{max_new_tokens:128}),'翻译太久没有完成，请再试一次。');
+    const output=Array.isArray(result)?result[0]:result;
+    const translated=output?.translation_text || output?.generated_text || '';
+    if(!translated) throw new Error('这次没有翻译成功，请再试一次。');
     onProgress('');
     return translated.trim();
-  } catch (error) {
-    translatorPromise = null;
-    throw error;
+  } catch(error) {
+    translatorPromise=null;
+    // Last-resort free web fallback also helps browsers whose WASM model cannot start.
+    try {
+      onProgress('正在使用备用免费翻译…');
+      return await translationWithTimeout(translateWithFreeWebFallback(input),'翻译失败，请检查网络后再试一次。');
+    } catch(_) {
+      throw error;
+    }
   }
 }
 
@@ -533,7 +568,14 @@ function wordCards(en){
   return tokenizeSentence(en).map(w=>`<span class="mini-word">${escapeHtml(displayEnglish(w.text))}</span>`).join(' ');
 }
 
-function shuffleCopy(items){return [...items].sort(()=>Math.random()-0.5);}
+function shuffleCopy(items){
+  const out=[...items];
+  for(let i=out.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [out[i],out[j]]=[out[j],out[i]];
+  }
+  return out;
+}
 
 function practiceTypeLabel(type){
   return ({word:'单词意思', 'word-reverse':'中文 → 英文', 'word-listen':'听单词', 'sentence-order':'排列句子', 'sentence-meaning':'英文 → 中文', 'sentence-listen':'听句子', 'sentence-fill':'句子填空', 'sentence-english':'中文 → 英文'})[type] || '练习';
@@ -761,27 +803,32 @@ function bindOrderPractice(){
 
 async function doTranslate(){const input=document.querySelector('#zhInput');const status=document.querySelector('#status');const text=input?.value?.trim();if(!text){status.textContent='请先说一句中文，或者打字。';return;}try{status.textContent='正在准备…';const en=await translateZhToEn(text,msg=>{status.textContent=msg});currentTranslation={zh:text,en};status.textContent='翻译好了。';document.querySelector('#resultArea').innerHTML=resultCard(currentTranslation);bind();}catch(e){status.textContent=e.message||'翻译失败，请再试一次。';}}
 function doMic(){const status=document.querySelector('#status');if(!isRecognitionSupported()){status.textContent='这个浏览器不能用语音输入，请直接打字。';return;}try{startChineseRecognition({onStart:()=>{status.textContent='正在听…说完一句就可以。';document.querySelector('#micBtn').textContent='🎙️ 正在听';},onText:text=>{document.querySelector('#zhInput').value=text;status.textContent='听到了，正在翻译…';doTranslate();},onError:()=>{status.textContent='没有听清楚。可以再说一次，或者打字。';},onEnd:()=>{const b=document.querySelector('#micBtn');if(b)b.textContent='🎤 说中文';}});}catch(e){status.textContent=e.message;}}
+let feedbackAudio = null;
 function answerTone(correct){
   try{
-    const AC=window.AudioContext||window.webkitAudioContext;
-    if(!AC) return;
-    const ctx=new AC();
-    const now=ctx.currentTime;
-    const osc=ctx.createOscillator();
-    const gain=ctx.createGain();
-    osc.connect(gain); gain.connect(ctx.destination);
-    if(correct){
-      osc.frequency.setValueAtTime(660,now);
-      osc.frequency.setValueAtTime(880,now+0.09);
-    }else{
-      osc.frequency.setValueAtTime(260,now);
-      osc.frequency.setValueAtTime(190,now+0.12);
-    }
-    gain.gain.setValueAtTime(0.0001,now);
-    gain.gain.exponentialRampToValueAtTime(0.24,now+0.015);
-    gain.gain.exponentialRampToValueAtTime(0.0001,now+0.22);
-    osc.start(now); osc.stop(now+0.24);
-    setTimeout(()=>ctx.close?.(),350);
+    const src=correct?'./audio/correct.wav':'./audio/incorrect.wav';
+    if(feedbackAudio){feedbackAudio.pause();feedbackAudio.currentTime=0;}
+    feedbackAudio=new Audio(src);
+    feedbackAudio.volume=1.0;
+    const play=feedbackAudio.play();
+    if(play?.catch) play.catch(()=>{
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(!AC)return;
+      const ctx=new AC();
+      ctx.resume?.().then(()=>{
+        const now=ctx.currentTime;
+        const osc=ctx.createOscillator();
+        const gain=ctx.createGain();
+        osc.connect(gain);gain.connect(ctx.destination);
+        if(correct){osc.frequency.setValueAtTime(880,now);osc.frequency.setValueAtTime(1320,now+0.12);}
+        else{osc.frequency.setValueAtTime(230,now);osc.frequency.setValueAtTime(150,now+0.14);}
+        gain.gain.setValueAtTime(0.0001,now);
+        gain.gain.exponentialRampToValueAtTime(0.75,now+0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001,now+0.32);
+        osc.start(now);osc.stop(now+0.34);
+        setTimeout(()=>ctx.close?.(),500);
+      });
+    });
   }catch(err){}
 }
 function answerQuestion(answer){
@@ -807,4 +854,4 @@ function answerQuestion(answer){
 }
 
 render();
-if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js?v=54').catch(()=>{}));
+if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js?v=55').catch(()=>{}));
